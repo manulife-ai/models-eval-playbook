@@ -14,6 +14,13 @@ Verify the provider environment variables are available.
 MLFLOW_TRACKING_URI="" # Use value http://localhost:5000/ for local mlflow
 MLFLOW_EXPERIMENT_ID="" # [OPTIONAL] defaults to the Default experiment on local mlflow server
 
+# [Optional] If you are using Databricks UC as a tracking server Include the following environments and ensure you are logged in to the profile.
+# databricks auth login --profile <DATBARICKS_AUTH_PROFILE> --host <DATABRICKS_URL>
+MLFLOW_TRACKING_URI=databricks://<DATBARICKS_AUTH_PROFILE>
+MLFLOW_REGISTRY_URI=databricks-uc
+DATABRICKS_HOST=<DATABRICKS_URL>
+MLFLOW_EXPERIMENT_ID=<EXPERIMENT_ID>
+
 # [REQUIRED] Evaluators must provide one of the following:
 # Add the following environment variables if you are using OpenAI API Compliant Providers. Eg:
 # 1. Azure OpenAI/Foundry: Example https://<INSTANCE_NAME>.openai.azure.com/openai/v1 (Note that Azure OpenAI and Foundry instance provides provide openai api compliant API at the following API Base <URL>/openai/v1)

@@ -2,6 +2,8 @@
 # requires-python = ">=3.12"
 # dependencies = [
 #     "click",
+#     "databricks-agents",
+#     "databricks-sdk",
 #     "langchain",
 #     "langchain-openai",
 #     "mlflow",
@@ -149,9 +151,10 @@ def run_evaluations(
         @scorer(name="readability", description="Computes readability score for the output using flesch kincaid grade level")
         def readability(outputs, expectations):
             predicted = extract_content(outputs)
-            r = Readability(predicted)
-            fkgl = r.flesch_kincaid().grade_level
-            return fkgl
+            if len(predicted.strip()) >= 100:    
+                r = Readability(predicted)
+                fkgl = r.flesch_kincaid().score
+                return fkgl
 
         # Run Evaluations
         results = mlflow.genai.evaluate(
