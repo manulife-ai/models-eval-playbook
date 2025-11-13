@@ -149,7 +149,7 @@ def run_evaluations(
                 return similarity
 
         @scorer(name="readability", description="Computes readability score for the output using flesch kincaid grade level")
-        def readability(outputs, expectations):
+        def readability(outputs):
             predicted = extract_content(outputs)
             if len(predicted.strip()) >= 100:    
                 r = Readability(predicted)
