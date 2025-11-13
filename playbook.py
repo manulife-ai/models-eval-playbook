@@ -86,8 +86,12 @@ def run_evaluations(
             data.to_json(temp_file, orient='records')
             mlflow.log_artifact(temp_file, artifact_path='data')
         # Define the evaluation functions or scorers here
-        safety = Safety()
-        correctness = Correctness()
+        safety = Safety(
+            model=to_litellm_model_name(judge, provider),
+        )
+        correctness = Correctness(
+            model=to_litellm_model_name(judge, provider),
+        )
         clarity = Guidelines(
             model=to_litellm_model_name(judge, provider),
             name="clarity",
