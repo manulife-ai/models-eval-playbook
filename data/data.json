@@ -683,5 +683,30 @@
             "task": "text-generation",
             "id": "24"
         }
+    },
+    {
+        "expectations": {
+            "expected_response": "$61",
+            "guidelines": [
+                "Calculates the total out-of-pocket loss for the jeweler accurately.",
+                "Answers concisely with just the final amount."
+            ]
+        },
+        "inputs": {
+            "messages": [
+                {
+                    "type": "system",
+                    "content": "You are going to provide exact answers to the questions asked. Be concise and accurate."
+                },
+                {
+                    "type": "user",
+                    "content": "A woman buys a $78 necklace at a jewelry store. She gives the jeweler a check for $100. Because he does not have the $22 change on hand, he goes to another merchant next door. There he exchanges the woman's check for $100 in cash. He returns and gives the woman the necklace and her change. Later the check bounces and he must make it good to the other merchant. He originally paid $39 for the necklace. What is his total out-of-pocket loss?"
+                }
+            ]
+        },
+        "tags": {
+            "task": "text-generation",
+            "id": "25"
+        }
     }
 ]
