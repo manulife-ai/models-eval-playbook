@@ -69,9 +69,9 @@ def to_litellm_model_name(model: str, provider: str):
 def avg_token_usage(traces) -> dict[str, float]:
     usg = {}
     for trace in traces:
-        total_usage = trace.info.token_usage
-        for key, value in total_usage.items():
-            usg[key] = usg.get(key, 0) + value
+        if total_usage := trace.info.token_usage:
+            for key, value in total_usage.items():
+                usg[key] = usg.get(key, 0) + value
     return {f"avg_{key}": value / len(traces) for key, value in usg.items()}
 
 
