@@ -277,9 +277,14 @@ def evaluate(
         enterpise_data = pd.read_json(
             Path(data_dir) / "enterprise.json", orient="records"
         )
-        vision_data = pd.read_json(Path(data_dir) / "vision.json", orient="records")
+        hallucination_data = pd.read_json(
+            Path(data_dir) / "hallucination.json", orient="records"
+        )
+        vision_data = pd.read_json(Path(data_dir) / "vision.json", orient="records"
+        )
         model_data = pd.read_json(Path(data_dir) / "data.json", orient="records")
         mlflow.log_artifact(Path(data_dir) / "enterprise.json", artifact_path="data")
+        mlflow.log_artifact(Path(data_dir) / "hallucination.json", artifact_path="data")
         mlflow.log_artifact(Path(data_dir) / "vision.json", artifact_path="data")
         mlflow.log_artifact(Path(data_dir) / "data.json", artifact_path="data")
         agent = create_agent(model=to_langchain_model_name(model, provider))
@@ -309,6 +314,28 @@ def evaluate(
                 scorers=enterprise_scorers,
             )
             mlflow.log_metrics(results.metrics, run_id=run.info.run_id)
+
+        # Hallucination evaluations
+        with mlflow.start_run(
+            run_name=f"playbook-{model}-hallucination-{epoch_time}",
+            description=f"Comprehensive hallucination evaluation run for model {model} with judge {judge}",
+            parent_run_id=run.info.run_id,
+            nested=True,
+        ) as hallucination_run:
+            print(f"Created hallucination run with ID: {hallucination_run.info.run_id}")
+            hallucination_scorers = [
+                ExpectationsGuidelines(
+                    model=to_litellm_model_name(judge, provider),
+                    name="follows_instructions",
+                ),
+            ]
+            results = mlflow.genai.evaluate(
+                data=hallucination_data,
+                predict_fn=predict_fn,
+                scorers=hallucination_scorers,
+            )
+            mlflow.log_metrics(results.metrics, run_id=run.info.run_id)
+
         # Vision evaluations
         if with_vision:
             with mlflow.start_run(
