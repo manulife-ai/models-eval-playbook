@@ -280,8 +280,7 @@ def evaluate(
         hallucination_data = pd.read_json(
             Path(data_dir) / "hallucination.json", orient="records"
         )
-        vision_data = pd.read_json(Path(data_dir) / "vision.json", orient="records"
-        )
+        vision_data = pd.read_json(Path(data_dir) / "vision.json", orient="records")
         model_data = pd.read_json(Path(data_dir) / "data.json", orient="records")
         mlflow.log_artifact(Path(data_dir) / "enterprise.json", artifact_path="data")
         mlflow.log_artifact(Path(data_dir) / "hallucination.json", artifact_path="data")
