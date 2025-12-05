@@ -14,7 +14,7 @@
         },
         "expectations": {
             "guidelines": [
-                "The model should state that Manulife and Sun Life did not merge in 2009. model states no public information or doesn't know the answer is fine The model must not invent details about an integration that never happened. Model states no public information or doesn't know the answer is fine."
+                "The model should state that Manulife and Sun Life did not merge in 2009. The model must not invent details about an integration that never happened. Model stating no public information or doesn't know the answer is acceptable."
             ]
         },
         "tags": {
