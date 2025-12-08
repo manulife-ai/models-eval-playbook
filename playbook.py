@@ -17,6 +17,7 @@
 # ]
 # ///
 import datetime
+import json
 import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -57,6 +58,27 @@ def extract_content(outputs) -> str:
     if isinstance(outputs, list):
         return extract_content(outputs=outputs[-1])
     return str(outputs)
+
+
+def flatten_json(obj, parent_key: str = "", sep: str = ".") -> dict:
+    """Flatten nested JSON to dot-notation paths for field-level comparison.
+
+    Examples:
+        {"a": {"b": 1}} -> {"a.b": 1}
+        {"items": [{"x": 1}, {"x": 2}]} -> {"items[0].x": 1, "items[1].x": 2}
+    """
+    items = {}
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            new_key = f"{parent_key}{sep}{k}" if parent_key else k
+            items.update(flatten_json(v, new_key, sep))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            new_key = f"{parent_key}[{i}]"
+            items.update(flatten_json(v, new_key, sep))
+    else:
+        items[parent_key] = obj
+    return items
 
 
 def to_langchain_model_name(model: str, provider: str):
@@ -141,6 +163,59 @@ def cosine_similarity(outputs, expectations):
         )
         similarity = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]
         return similarity
+
+
+@scorer(
+    name="field_accuracy",
+    description="Calculates percentage of correctly extracted fields from JSON output",
+)
+def field_accuracy(outputs, expectations) -> float | None:
+    """Calculate field-level accuracy for JSON extraction tasks.
+
+    Returns the percentage of fields that were correctly extracted,
+    comparing flattened JSON structures field by field.
+
+    Returns:
+        float: Percentage accuracy (0-100), or None if no expected_json provided.
+    """
+    if "expected_json" not in expectations:
+        return None
+
+    try:
+        expected = json.loads(expectations["expected_json"])
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+    # Extract and parse actual output
+    actual_str = extract_content(outputs)
+
+    # Handle markdown code blocks (```json ... ```)
+    if "```json" in actual_str:
+        actual_str = actual_str.split("```json")[1].split("```")[0].strip()
+    elif "```" in actual_str:
+        actual_str = actual_str.split("```")[1].split("```")[0].strip()
+
+    try:
+        actual = json.loads(actual_str)
+    except (json.JSONDecodeError, TypeError):
+        return 0.0  # Invalid JSON output = 0% accuracy
+
+    # Flatten both JSON structures for field-by-field comparison
+    expected_flat = flatten_json(expected)
+    actual_flat = flatten_json(actual)
+
+    if not expected_flat:
+        return 100.0  # No fields to compare = perfect match
+
+    # Count correctly extracted fields
+    correct_fields = sum(
+        1
+        for key, expected_value in expected_flat.items()
+        if key in actual_flat and actual_flat[key] == expected_value
+    )
+
+    total_fields = len(expected_flat)
+    return (correct_fields / total_fields) * 100
 
 
 def run_evaluations(
@@ -253,12 +328,19 @@ def run_evaluations(
     help="Path to the data directory",
     type=click.Path(exists=True, file_okay=False, dir_okay=True),
 )
+@click.option(
+    "--limit",
+    default=None,
+    type=int,
+    help="Limit number of test cases per dataset (useful for debugging)",
+)
 def evaluate(
     model: str,
     judge: str,
     data_dir: str,
     provider: str = "openai",
     with_vision: bool = False,
+    limit: int | None = None,
 ):
     print(
         f"Starting evaluation for model: {model}, judge: {judge}, provider: {provider}, with_vision: {with_vision}, data_dir: {data_dir}"
@@ -282,6 +364,15 @@ def evaluate(
         )
         vision_data = pd.read_json(Path(data_dir) / "vision.json", orient="records")
         model_data = pd.read_json(Path(data_dir) / "data.json", orient="records")
+
+        # Limit data for debugging if --limit is set
+        if limit:
+            enterpise_data = enterpise_data.head(limit)
+            hallucination_data = hallucination_data.head(limit)
+            vision_data = vision_data.head(limit)
+            model_data = model_data.head(limit)
+            print(f"Limiting each dataset to {limit} entries for debugging")
+
         mlflow.log_artifact(Path(data_dir) / "enterprise.json", artifact_path="data")
         mlflow.log_artifact(Path(data_dir) / "hallucination.json", artifact_path="data")
         mlflow.log_artifact(Path(data_dir) / "vision.json", artifact_path="data")
@@ -355,6 +446,7 @@ def evaluate(
                         model=to_litellm_model_name(judge, provider),
                         name="follows_instructions",
                     ),
+                    field_accuracy,
                 ]
                 results = mlflow.genai.evaluate(
                     data=vision_data,
