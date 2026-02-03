@@ -2,50 +2,125 @@
 
 ## Prerequisite
 
-1. uv installed on machine
-2. mlflow server available (used for tracking runs, not required but helpful. Can also run a local mlflow server)
+1. `uv` installed on machine
+2. Databricks workspace with MLflow tracking enabled (or local MLflow server)
+3. Databricks CLI installed (if using Databricks tracking)
 
 ## Setup
 
-Verify the provider environment variables are available.
+### 1. Environment Configuration
+
+Copy `.env.example` to `.env` and configure your API endpoints:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` with your actual values. The playbook supports **separate configurations** for the model being tested and the judge model:
 
 ```sh
-# [Optional] If you are using MLFlow UI to view the results.
-MLFLOW_TRACKING_URI="" # Use value http://localhost:5000/ for local mlflow
-MLFLOW_EXPERIMENT_ID="" # [OPTIONAL] defaults to the Default experiment on local mlflow server
-
-# [Optional] If you are using Databricks UC as a tracking server Include the following environments and ensure you are logged in to the profile.
-# databricks auth login --profile <DATBARICKS_AUTH_PROFILE> --host <DATABRICKS_URL>
-MLFLOW_TRACKING_URI=databricks://<DATBARICKS_AUTH_PROFILE>
+# MLflow Tracking - Databricks Unity Catalog
+MLFLOW_TRACKING_URI=databricks://<DATABRICKS_AUTH_PROFILE>
 MLFLOW_REGISTRY_URI=databricks-uc
 DATABRICKS_HOST=<DATABRICKS_URL>
 MLFLOW_EXPERIMENT_ID=<EXPERIMENT_ID>
 
-# [REQUIRED] Evaluators must provide one of the following:
-# Add the following environment variables if you are using OpenAI API Compliant Providers. Eg:
-# 1. Azure OpenAI/Foundry: Example https://<INSTANCE_NAME>.openai.azure.com/openai/v1 (Note that Azure OpenAI and Foundry instance provides provide openai api compliant API at the following API Base <URL>/openai/v1)
-# 2. OpenRouter: https://openrouter.ai/api/v1
-# 3. Ollama: http://localhost:11434/v1/
-# 4. Alicloud: https://[ServiceCode].[RegionID].aliyuncs.com/v1
-# 5. Anthropic (** will require some additional dependencies... see the Playbook owners for support.)
-# 6. Amazon Bedrock (** will require some additional dependencies... see the Playbook owners for support.)
-# 7. Cohere (** will require some additional dependencies... see the Playbook owners for support.)
-# 8. Together AI (** will require some additional dependencies... see the Playbook owners for support.)
-# 9. Any other providers such as Google Gemini, xAI, Mistral, and more. (** will require some additional dependencies... see the Playbook owners for support.)
+# Model Configuration (the model being evaluated)
+MODEL_API_BASE=https://openrouter.ai/api/v1
+MODEL_API_KEY=<YOUR_MODEL_API_KEY>
+MODEL_API_VERSION=preview
 
-OPENAI_API_VERSION=preview
-OPENAI_API_BASE=<YOUR_ENDPOINT_HERE> 
-OPENAI_API_KEY=<YOUR_API_KEY>
+# Judge Configuration (the model scoring responses)
+JUDGE_API_BASE=https://openrouter.ai/api/v1
+JUDGE_API_KEY=<YOUR_JUDGE_API_KEY>
+JUDGE_API_VERSION=preview
 ```
+
+**Supported Providers:**
+- **OpenRouter**: `https://openrouter.ai/api/v1`
+- **Azure OpenAI/Foundry**: `https://<INSTANCE_NAME>.openai.azure.com/openai/v1`
+- **Ollama** (local): `http://localhost:11434/v1/`
+- **Alibaba Cloud**: `https://[ServiceCode].[RegionID].aliyuncs.com/v1`
+- Others (Anthropic, Bedrock, Cohere, Together AI) may require additional dependencies
+
+### 2. Databricks Authentication
+
+If using Databricks MLflow tracking, authenticate before running evaluations:
+
+```bash
+databricks auth login --profile <DATABRICKS_AUTH_PROFILE> --host <DATABRICKS_URL>
+```
+
+> **Note**: Replace `<DATABRICKS_AUTH_PROFILE>` and `<DATABRICKS_URL>` with values from your `.env` file.
 
 ## Running Evaluations
-Assuming the above prerequisites are met and the setup is done:
 
-```sh
-uv run --script playbook.py --model <MODEL_NAME> --judge <MODEL_NAME> # Provider can also be customized if you anything other than OpenAI --provider <provider>. Additional Library Requirements may apply. See developer for full setup details.
+### Basic Usage
+
+```bash
+uv run playbook.py --model <MODEL_NAME> --judge <JUDGE_MODEL_NAME>
 ```
 
-Example for running an eval on gpt-4o and gpt-5 as judge
-```sh
-uv run --script playbook.py --model gpt-4o --judge gpt-5
+### Examples
+
+**Test with limit (for debugging):**
+```bash
+uv run playbook.py --model "google/gemini-3-flash-preview" --judge "gpt-5.2" --limit 1
 ```
+
+**Full evaluation:**
+```bash
+uv run playbook.py --model "google/gemini-3-flash-preview" --judge "gpt-5.2"
+```
+
+**With vision support:**
+```bash
+uv run playbook.py --model "gpt-4o" --judge "gpt-5.2" --with-vision
+```
+
+### Command Options
+
+- `--model`: Model name to evaluate (required)
+- `--judge`: Judge model name for scoring (required)
+- `--provider`: Provider for the model being tested (default: `openai`)
+- `--judge-provider`: Provider for the judge model (default: same as `--provider`)
+- `--limit`: Limit number of test cases per dataset (useful for debugging)
+- `--with-vision`: Include vision evaluation tests
+- `--data-dir`: Path to test data directory (default: `./data`)
+
+## Viewing Results
+
+Results are automatically logged to your configured MLflow tracking server.
+
+### Databricks Users
+
+View results in your Databricks workspace:
+```
+https://<DATABRICKS_HOST>/ml/experiments/<EXPERIMENT_ID>
+```
+
+### Local MLflow Users
+
+Start the MLflow UI:
+```bash
+mlflow ui
+```
+
+Then navigate to http://localhost:5000
+
+## Configuration Details
+
+### Separate Model and Judge Endpoints
+
+The playbook supports different API endpoints for the tested model and judge model. This enables scenarios like:
+
+- Testing a local Ollama model with GPT-5 as judge
+- Testing an Azure deployment with OpenRouter judge  
+- Using different API keys for tested vs judge models
+
+**Environment Variable Fallback Chain:**
+
+1. **Model being tested**: `MODEL_API_*` → `OPENAI_API_*`
+2. **Judge model**: `JUDGE_API_*` → `MODEL_API_*` → `OPENAI_API_*`
+
+This maintains backward compatibility with existing configurations.
