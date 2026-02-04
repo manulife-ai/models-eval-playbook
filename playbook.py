@@ -187,6 +187,38 @@ def to_litellm_model_name(model: str, config: ModelConfig) -> str:
     return f"{config.provider}:/{model}"
 
 
+from contextlib import contextmanager
+
+
+@contextmanager
+def temporary_env(config: ModelConfig):
+    """Temporarily apply a config's environment variables, then restore previous values.
+
+    This ensures that the model agent uses model credentials even if judge credentials
+    were applied to environment variables afterwards.
+    """
+    # Save current env vars
+    saved_env = {}
+    env_vars = config.to_env_vars()
+
+    for key in env_vars.keys():
+        saved_env[key] = os.environ.get(key)
+
+    # Apply new config
+    config.apply_to_env()
+
+    try:
+        yield
+    finally:
+        # Restore previous values
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+
 def avg_token_usage(traces) -> dict[str, float]:
     usg = {}
     for trace in traces:
@@ -521,14 +553,16 @@ def evaluate(
         mlflow.log_artifact(Path(data_dir) / "vision.json", artifact_path="data")
         mlflow.log_artifact(Path(data_dir) / "data.json", artifact_path="data")
 
-        # Create agent with model config (applies model env vars)
+        # Create agent (config will be applied during each invocation via predict_fn)
         agent = create_agent(model=to_langchain_model_name(model, model_config))
 
         # Get judge model name (applies judge config to env)
         judge_model_name = to_litellm_model_name(judge, judge_config)
 
         def predict_fn(messages):
-            return agent.invoke({"messages": messages})
+            # Use model config during agent invocation to avoid using judge credentials
+            with temporary_env(model_config):
+                return agent.invoke({"messages": messages})
 
         with mlflow.start_run(
             run_name=f"playbook-{model}-enterprise-{epoch_time}",
