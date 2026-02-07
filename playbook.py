@@ -18,7 +18,9 @@
 # ///
 import datetime
 import json
+import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Callable
@@ -38,6 +40,82 @@ from mlflow.genai.scorers import (
     scorer,
 )
 from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
+
+# =============================================================================
+# Model Configuration
+# =============================================================================
+
+
+@dataclass
+class ModelConfig:
+    """Configuration for a model endpoint (either tested model or judge model).
+
+    Attributes:
+        provider: The model provider (e.g., "openai", "azure", "ollama")
+        api_base: The API base URL
+        api_key: The API key for authentication
+        api_version: The API version (required for Azure OpenAI)
+    """
+
+    provider: str
+    api_base: str | None = None
+    api_key: str | None = None
+    api_version: str | None = None
+
+    def to_env_vars(self) -> dict[str, str]:
+        """Return environment variables needed for this config."""
+        env = {}
+        if self.api_base:
+            env["OPENAI_API_BASE"] = self.api_base
+        if self.api_key:
+            env["OPENAI_API_KEY"] = self.api_key
+        if self.api_version:
+            env["OPENAI_API_VERSION"] = self.api_version
+        return env
+
+    def apply_to_env(self) -> None:
+        """Apply this config to environment variables."""
+        for key, value in self.to_env_vars().items():
+            os.environ[key] = value
+
+
+def load_model_config(provider: str = "openai") -> ModelConfig:
+    """Load configuration for the model being tested.
+
+    Fallback chain: MODEL_API_* -> OPENAI_API_*
+    """
+    return ModelConfig(
+        provider=provider,
+        api_base=os.getenv("MODEL_API_BASE", os.getenv("OPENAI_API_BASE")),
+        api_key=os.getenv("MODEL_API_KEY", os.getenv("OPENAI_API_KEY")),
+        api_version=os.getenv("MODEL_API_VERSION", os.getenv("OPENAI_API_VERSION")),
+    )
+
+
+def load_judge_config(provider: str | None = None) -> ModelConfig:
+    """Load configuration for the judge model.
+
+    Fallback chain: JUDGE_API_* -> MODEL_API_* -> OPENAI_API_*
+    If provider is None, falls back to MODEL provider from env or "openai".
+    """
+    if provider is None:
+        provider = os.getenv("JUDGE_PROVIDER", os.getenv("MODEL_PROVIDER", "openai"))
+
+    return ModelConfig(
+        provider=provider,
+        api_base=os.getenv(
+            "JUDGE_API_BASE",
+            os.getenv("MODEL_API_BASE", os.getenv("OPENAI_API_BASE")),
+        ),
+        api_key=os.getenv(
+            "JUDGE_API_KEY",
+            os.getenv("MODEL_API_KEY", os.getenv("OPENAI_API_KEY")),
+        ),
+        api_version=os.getenv(
+            "JUDGE_API_VERSION",
+            os.getenv("MODEL_API_VERSION", os.getenv("OPENAI_API_VERSION")),
+        ),
+    )
 
 
 def extract_content(outputs) -> str:
@@ -81,12 +159,64 @@ def flatten_json(obj, parent_key: str = "", sep: str = ".") -> dict:
     return items
 
 
-def to_langchain_model_name(model: str, provider: str):
-    return f"{provider}:{model}"
+def to_langchain_model_name(model: str, config: ModelConfig) -> str:
+    """Format model name for LangChain and apply config to environment.
+
+    Args:
+        model: The model name/identifier
+        config: ModelConfig with provider and API credentials
+
+    Returns:
+        Formatted model name for LangChain (provider:model)
+    """
+    config.apply_to_env()
+    return f"{config.provider}:{model}"
 
 
-def to_litellm_model_name(model: str, provider: str):
-    return f"{provider}:/{model}"
+def to_litellm_model_name(model: str, config: ModelConfig) -> str:
+    """Format model name for LiteLLM and apply config to environment.
+
+    Args:
+        model: The model name/identifier
+        config: ModelConfig with provider and API credentials
+
+    Returns:
+        Formatted model name for LiteLLM (provider:/model)
+    """
+    config.apply_to_env()
+    return f"{config.provider}:/{model}"
+
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def temporary_env(config: ModelConfig):
+    """Temporarily apply a config's environment variables, then restore previous values.
+
+    This ensures that the model agent uses model credentials even if judge credentials
+    were applied to environment variables afterwards.
+    """
+    # Save current env vars
+    saved_env = {}
+    env_vars = config.to_env_vars()
+
+    for key in env_vars.keys():
+        saved_env[key] = os.environ.get(key)
+
+    # Apply new config
+    config.apply_to_env()
+
+    try:
+        yield
+    finally:
+        # Restore previous values
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
 
 
 def avg_token_usage(traces) -> dict[str, float]:
@@ -224,8 +354,26 @@ def run_evaluations(
     data: pd.DataFrame,
     predict_fn: Callable,
     scorers: list[Scorer] = [],
-    provider: str = "openai",
+    model_config: ModelConfig | None = None,
+    judge_config: ModelConfig | None = None,
 ) -> pd.DataFrame:
+    """Run evaluations with separate model and judge configurations.
+
+    Args:
+        model: Name of the model being tested
+        judge: Name of the judge model
+        data: DataFrame with test cases
+        predict_fn: Function to get predictions from the model
+        scorers: Additional scorers to use
+        model_config: Configuration for the tested model (loads from env if None)
+        judge_config: Configuration for the judge model (loads from env if None)
+    """
+    # Load configs from environment if not provided
+    if model_config is None:
+        model_config = load_model_config()
+    if judge_config is None:
+        judge_config = load_judge_config()
+
     epoch_time = int(time.time())
     with mlflow.start_run(
         run_name=f"playbook-eval-{model}-{epoch_time}",
@@ -235,7 +383,10 @@ def run_evaluations(
             {
                 "model": model,
                 "judge": judge,
-                "provider": provider,
+                "model_provider": model_config.provider,
+                "judge_provider": judge_config.provider,
+                "model_api_base": model_config.api_base or "default",
+                "judge_api_base": judge_config.api_base or "default",
                 "run_date": datetime.datetime.now().isoformat(),
                 "num_cases": len(data),
             }
@@ -244,20 +395,24 @@ def run_evaluations(
             temp_file = f"{temp_dir}/evaluation.json"
             data.to_json(temp_file, orient="records")
             mlflow.log_artifact(temp_file, artifact_path="data")
+
+        # Get judge model name (applies judge config to env)
+        judge_model_name = to_litellm_model_name(judge, judge_config)
+
         # Define the evaluation functions or scorers here
         safety = Safety(
-            model=to_litellm_model_name(judge, provider),
+            model=judge_model_name,
         )
         correctness = Correctness(
-            model=to_litellm_model_name(judge, provider),
+            model=judge_model_name,
         )
         clarity = Guidelines(
-            model=to_litellm_model_name(judge, provider),
+            model=judge_model_name,
             name="clarity",
             guidelines=["The response must be clear, coherent, and concise"],
         )
         english = Guidelines(
-            model=to_litellm_model_name(judge, provider),
+            model=judge_model_name,
             name="follows_user_language_preference",
             guidelines=[
                 "The response must be in the exact same language as the user's original input",
@@ -271,7 +426,7 @@ def run_evaluations(
         def follows_guidelines(inputs, outputs, expectations) -> bool:
             if "guidelines" in expectations:
                 guidelines = ExpectationsGuidelines(
-                    model=to_litellm_model_name(judge, provider),
+                    model=judge_model_name,
                     name="follows_instructions",
                 )
                 return guidelines(
@@ -315,7 +470,12 @@ def run_evaluations(
 @click.command
 @click.option("--model", help="Model to evaluate", required=True)
 @click.option("--judge", help="Judge to use for evaluation", required=True)
-@click.option("--provider", help="Provider of the model", default="openai")
+@click.option("--provider", help="Provider of the model being tested", default="openai")
+@click.option(
+    "--judge-provider",
+    help="Provider of the judge model (defaults to --provider if not set)",
+    default=None,
+)
 @click.option(
     "--with-vision",
     default=False,
@@ -339,19 +499,34 @@ def evaluate(
     judge: str,
     data_dir: str,
     provider: str = "openai",
+    judge_provider: str | None = None,
     with_vision: bool = False,
     limit: int | None = None,
 ):
-    print(
-        f"Starting evaluation for model: {model}, judge: {judge}, provider: {provider}, with_vision: {with_vision}, data_dir: {data_dir}"
+    # Build configurations for model and judge
+    model_config = load_model_config(provider=provider)
+    judge_config = load_judge_config(
+        provider=judge_provider if judge_provider else provider
     )
+
+    print(
+        f"Starting evaluation for model: {model} (provider: {model_config.provider}, api_base: {model_config.api_base})"
+    )
+    print(
+        f"Using judge: {judge} (provider: {judge_config.provider}, api_base: {judge_config.api_base})"
+    )
+    print(f"Options: with_vision={with_vision}, data_dir={data_dir}")
+
     epoch_time = int(time.time())
     with mlflow.start_run(run_name=f"playbook-{model}-{epoch_time}") as run:
         mlflow.log_params(
             {
                 "model": model,
                 "judge": judge,
-                "provider": provider,
+                "model_provider": model_config.provider,
+                "judge_provider": judge_config.provider,
+                "model_api_base": model_config.api_base or "default",
+                "judge_api_base": judge_config.api_base or "default",
                 "run_date": datetime.datetime.now().isoformat(),
             }
         )
@@ -377,10 +552,17 @@ def evaluate(
         mlflow.log_artifact(Path(data_dir) / "hallucination.json", artifact_path="data")
         mlflow.log_artifact(Path(data_dir) / "vision.json", artifact_path="data")
         mlflow.log_artifact(Path(data_dir) / "data.json", artifact_path="data")
-        agent = create_agent(model=to_langchain_model_name(model, provider))
+
+        # Create agent (config will be applied during each invocation via predict_fn)
+        agent = create_agent(model=to_langchain_model_name(model, model_config))
+
+        # Get judge model name (applies judge config to env)
+        judge_model_name = to_litellm_model_name(judge, judge_config)
 
         def predict_fn(messages):
-            return agent.invoke({"messages": messages})
+            # Use model config during agent invocation to avoid using judge credentials
+            with temporary_env(model_config):
+                return agent.invoke({"messages": messages})
 
         with mlflow.start_run(
             run_name=f"playbook-{model}-enterprise-{epoch_time}",
@@ -391,11 +573,11 @@ def evaluate(
             print(f"Created enterprise run with ID: {enterprise_run.info.run_id}")
             enterprise_scorers = [
                 ExpectationsGuidelines(
-                    model=to_litellm_model_name(judge, provider),
+                    model=judge_model_name,
                     name="follows_instructions",
                 ),
                 Safety(
-                    model=to_litellm_model_name(judge, provider),
+                    model=judge_model_name,
                 ),
             ]
             results = mlflow.genai.evaluate(
@@ -415,7 +597,7 @@ def evaluate(
             print(f"Created hallucination run with ID: {hallucination_run.info.run_id}")
             hallucination_scorers = [
                 ExpectationsGuidelines(
-                    model=to_litellm_model_name(judge, provider),
+                    model=judge_model_name,
                     name="follows_instructions",
                 ),
             ]
@@ -437,13 +619,13 @@ def evaluate(
                 print(f"Created vision run with ID: {vision_run.info.run_id}")
                 vision_scorers = [
                     Safety(
-                        model=to_litellm_model_name(judge, provider),
+                        model=judge_model_name,
                     ),
                     Correctness(
-                        model=to_litellm_model_name(judge, provider),
+                        model=judge_model_name,
                     ),
                     ExpectationsGuidelines(
-                        model=to_litellm_model_name(judge, provider),
+                        model=judge_model_name,
                         name="follows_instructions",
                     ),
                     field_accuracy,
@@ -464,14 +646,14 @@ def evaluate(
             print(f"Created model run with ID: {model_run.info.run_id}")
             model_scorers = [
                 ExpectationsGuidelines(
-                    model=to_litellm_model_name(judge, provider),
+                    model=judge_model_name,
                     name="follows_instructions",
                 ),
                 Safety(
-                    model=to_litellm_model_name(judge, provider),
+                    model=judge_model_name,
                 ),
                 Correctness(
-                    model=to_litellm_model_name(judge, provider),
+                    model=judge_model_name,
                 ),
                 bleu,
                 rouge,
