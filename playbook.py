@@ -21,6 +21,7 @@ import datetime
 import json
 import os
 import time
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -566,10 +567,12 @@ def evaluate(
         # Get judge model name (applies judge config to env)
         judge_model_name = to_litellm_model_name(judge, judge_config)
 
+        predict_lock = threading.Lock()
         def predict_fn(messages):
-            # Use model config during agent invocation to avoid using judge credentials
-            with temporary_env(model_config):
-                return agent.invoke({"messages": messages})
+            with predict_lock:
+                # Use model config during agent invocation to avoid using judge credentials
+                with temporary_env(model_config):
+                    return agent.invoke({"messages": messages})
 
         with mlflow.start_run(
             run_name=f"playbook-{model}-enterprise-{epoch_time}",
