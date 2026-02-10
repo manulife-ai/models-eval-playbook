@@ -5,6 +5,7 @@
 #     "databricks-agents",
 #     "databricks-sdk",
 #     "langchain",
+#     "langchain-anthropic",
 #     "langchain-openai",
 #     "mlflow",
 #     "nltk",
@@ -65,12 +66,18 @@ class ModelConfig:
     def to_env_vars(self) -> dict[str, str]:
         """Return environment variables needed for this config."""
         env = {}
-        if self.api_base:
-            env["OPENAI_API_BASE"] = self.api_base
-        if self.api_key:
-            env["OPENAI_API_KEY"] = self.api_key
-        if self.api_version:
-            env["OPENAI_API_VERSION"] = self.api_version
+        if self.provider == "anthropic":
+            if self.api_base:
+                env["ANTHROPIC_BASE_URL"] = self.api_base
+            if self.api_key:
+                env["ANTHROPIC_API_KEY"] = self.api_key
+        else:
+            if self.api_base:
+                env["OPENAI_API_BASE"] = self.api_base
+            if self.api_key:
+                env["OPENAI_API_KEY"] = self.api_key
+            if self.api_version:
+                env["OPENAI_API_VERSION"] = self.api_version
         return env
 
     def apply_to_env(self) -> None:
@@ -580,6 +587,8 @@ def evaluate(
                     model=judge_model_name,
                 ),
             ]
+            # Disable autolog to prevent tracing hangs
+            mlflow.autolog(disable=True)
             results = mlflow.genai.evaluate(
                 data=enterpise_data,
                 predict_fn=predict_fn,
