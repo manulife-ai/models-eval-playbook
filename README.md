@@ -55,38 +55,86 @@ databricks auth login --profile <DATABRICKS_AUTH_PROFILE> --host <DATABRICKS_URL
 
 ## Running Evaluations
 
-### Basic Usage
+### Run All Suites (End-to-End)
+
+When no `--eval` flag is provided, all four suites run in canonical order:
+**enterprise → hallucination → model → vision**.
 
 ```bash
-uv run playbook.py --model <MODEL_NAME> --judge <JUDGE_MODEL_NAME>
+uv run playbook.py --model "openai/gpt-4o" --judge "openai/gpt-4o"
 ```
 
-### Examples
+### Run Specific Suites
 
-**Test with limit (for debugging):**
+Use one or more `--eval` (or `-e`) flags to select which suites to run.
+Suites **always execute in canonical order** regardless of the order you
+specify them on the command line.
+
+```bash
+# Run only the enterprise suite
+uv run playbook.py --model "openai/gpt-4o" --judge "openai/gpt-4o" \
+    --eval enterprise
+
+# Run enterprise and model suites (executed as enterprise → model)
+uv run playbook.py --model "openai/gpt-4o" --judge "openai/gpt-4o" \
+    -e enterprise -e model
+
+# Run everything except vision
+uv run playbook.py --model "openai/gpt-4o" --judge "openai/gpt-4o" \
+    -e enterprise -e hallucination -e model
+```
+
+### Test with Limit (for debugging)
+
 ```bash
 uv run playbook.py --model "google/gemini-3-flash-preview" --judge "gpt-5.2" --limit 1
 ```
 
-**Full evaluation:**
-```bash
-uv run playbook.py --model "google/gemini-3-flash-preview" --judge "gpt-5.2"
+### Available Suites
+
+| Suite | Data File | Description |
+|---|---|---|
+| `enterprise` | `data/enterprise.json` | Brand safety, regulatory compliance, privacy, prompt injection, and other enterprise policy checks |
+| `hallucination` | `data/hallucination.json` | Groundedness and factual accuracy evaluation |
+| `model` | `data/data.json` | General model quality — correctness, clarity, BLEU, ROUGE, cosine similarity |
+| `vision` | `data/vision.json` | Multimodal / vision evaluation (optional — skipped if data file is absent) |
+
+### Canonical Execution Order
+
+Suites always run in this fixed order, regardless of how they are specified on the command line:
+
+```
+enterprise → hallucination → model → vision
 ```
 
-**With vision support:**
-```bash
-uv run playbook.py --model "gpt-4o" --judge "gpt-5.2" --with-vision
-```
+If a suite's data file is missing, that suite is skipped with a warning.
+If any suite fails, the run aborts immediately.
 
 ### Command Options
 
-- `--model`: Model name to evaluate (required)
-- `--judge`: Judge model name for scoring (required)
-- `--provider`: Provider for the model being tested (default: `openai`)
-- `--judge-provider`: Provider for the judge model (default: same as `--provider`)
-- `--limit`: Limit number of test cases per dataset (useful for debugging)
-- `--with-vision`: Include vision evaluation tests
-- `--data-dir`: Path to test data directory (default: `./data`)
+| Option | Short | Required | Description |
+|---|---|---|---|
+| `--model` | | ✅ | Model name to evaluate (e.g. `openai/gpt-4o`) |
+| `--judge` | | ✅ | Judge model name for scoring |
+| `--provider` | | | Provider for the model being tested (default: `openai`) |
+| `--judge-provider` | | | Provider for the judge model (default: same as `--provider`) |
+| `--eval` | `-e` | | Suite(s) to run. Repeatable. If omitted, all suites run. |
+| `--limit` | | | Limit number of test cases per dataset (useful for debugging) |
+| `--data-dir` | | | Path to test data directory (default: `./data`) |
+
+## MLflow Run Structure
+
+```
+Parent Run: playbook-{model}-{epoch}
+├── Child: playbook-{model}-enterprise-{epoch}
+├── Child: playbook-{model}-hallucination-{epoch}
+├── Child: playbook-{model}-model-{epoch}
+└── Child: playbook-{model}-vision-{epoch}
+```
+
+Each child run contains the evaluation metrics and traces for its suite.
+When running a subset of suites, only the selected child runs are created.
+Average token usage metrics are logged to every child run and propagated to the parent.
 
 ## Viewing Results
 
@@ -108,6 +156,18 @@ mlflow ui
 
 Then navigate to http://localhost:5000
 
+### Generating Reports
+
+Compare results across models from an MLflow experiment:
+
+```bash
+# Print comparison table
+uv run report.py --experiment <EXPERIMENT_ID>
+
+# Export to CSV
+uv run report.py --experiment <EXPERIMENT_ID> --output results.csv
+```
+
 ## Configuration Details
 
 ### Separate Model and Judge Endpoints
@@ -124,3 +184,11 @@ The playbook supports different API endpoints for the tested model and judge mod
 2. **Judge model**: `JUDGE_API_*` → `MODEL_API_*` → `OPENAI_API_*`
 
 This maintains backward compatibility with existing configurations.
+
+> ⚠️ **Never commit `.env` to version control.** Ensure it is listed in `.gitignore`.
+
+## Evaluation Specification
+
+See [`enterprise.md`](enterprise.md) for the full enterprise evaluation
+specification, including all 45 adversarial test prompts and expected model
+behaviours across 9 policy categories.
