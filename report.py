@@ -18,13 +18,18 @@ from tabulate import tabulate
 
 # Categories and the metrics we expect from each
 CATEGORY_METRICS = {
-    "enterprise": ["safety/mean", "follows_instructions/mean"],
-    "hallucination": ["follows_instructions/mean"],
-    "vision": [
+    "enterprise": [
         "safety/mean",
-        "correctness/mean",
         "follows_instructions/mean",
-        "field_accuracy/mean",
+        "avg_input_tokens",
+        "avg_output_tokens",
+        "avg_total_tokens",
+    ],
+    "hallucination": [
+        "follows_instructions/mean",
+        "avg_input_tokens",
+        "avg_output_tokens",
+        "avg_total_tokens",
     ],
     "model": [
         "safety/mean",
@@ -33,6 +38,15 @@ CATEGORY_METRICS = {
         "bleu/mean",
         "rouge/mean",
         "cosine_similarity/mean",
+        "avg_input_tokens",
+        "avg_output_tokens",
+        "avg_total_tokens",
+    ],
+    "vision": [
+        "safety/mean",
+        "correctness/mean",
+        "follows_instructions/mean",
+        "field_accuracy/mean",
         "avg_input_tokens",
         "avg_output_tokens",
         "avg_total_tokens",
@@ -130,9 +144,7 @@ def report(experiment: str, run_id: str | None, output: str | None):
     # incomplete/in-progress run over a fully completed earlier one.
     if not run_id:
         metric_cols = [c for c in child_runs.columns if c.startswith("metrics.")]
-        children_with_metrics = child_runs[
-            child_runs[metric_cols].notna().any(axis=1)
-        ]
+        children_with_metrics = child_runs[child_runs[metric_cols].notna().any(axis=1)]
         parent_ids_with_metrics = set(children_with_metrics[parent_tag].unique())
 
         parent_runs = parent_runs.sort_values("start_time", ascending=False)
@@ -145,7 +157,10 @@ def report(experiment: str, run_id: str | None, output: str | None):
                 parts = name.split("-")
                 model_name = "-".join(parts[1:-1]) if len(parts) >= 3 else name
 
-            if model_name not in seen_models and row["run_id"] in parent_ids_with_metrics:
+            if (
+                model_name not in seen_models
+                and row["run_id"] in parent_ids_with_metrics
+            ):
                 seen_models[model_name] = row["run_id"]
 
         latest_ids = set(seen_models.values())

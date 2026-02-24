@@ -42,6 +42,7 @@ from mlflow.genai.scorers import (
     scorer,
 )
 from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
+from contextlib import contextmanager
 
 # =============================================================================
 # Model Configuration
@@ -195,9 +196,6 @@ def to_litellm_model_name(model: str, config: ModelConfig) -> str:
     return f"{config.provider}:/{model}"
 
 
-from contextlib import contextmanager
-
-
 @contextmanager
 def temporary_env(config: ModelConfig):
     """Temporarily apply a config's environment variables, then restore previous values.
@@ -224,7 +222,6 @@ def temporary_env(config: ModelConfig):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
-
 
 
 def avg_token_usage(traces) -> dict[str, float]:
@@ -475,6 +472,246 @@ def run_evaluations(
         return results
 
 
+# =============================================================================
+# Suite Runners
+# =============================================================================
+
+# Canonical execution order – suites always run in this sequence.
+SUITE_ORDER: list[str] = ["enterprise", "hallucination", "model", "vision"]
+
+
+def _log_token_usage(run_id: str, parent_run_id: str) -> None:
+    """Search traces for a run and log avg token usage to both child and parent."""
+    traces = mlflow.search_traces(
+        filter_string=f"run_id = '{run_id}'", return_type="list"
+    )
+    token_metrics = avg_token_usage(traces)
+    mlflow.log_metrics(token_metrics)
+    mlflow.log_metrics(token_metrics, run_id=parent_run_id)
+
+
+def run_enterprise(
+    *,
+    model: str,
+    judge_model_name: str,
+    predict_fn: Callable,
+    data_dir: Path,
+    parent_run_id: str,
+    epoch: int,
+    limit: int | None = None,
+) -> None:
+    """Enterprise-policy evaluation (brand safety, regulatory, privacy, …)."""
+    data_path = data_dir / "enterprise.json"
+    if not data_path.exists():
+        click.echo(f"⚠️  Skipping enterprise: {data_path} not found")
+        return
+
+    data = pd.read_json(data_path, orient="records")
+    if limit:
+        data = data.head(limit)
+
+    click.echo(f"\n{'='*60}")
+    click.echo(f"  Enterprise Evaluation  ({len(data)} cases)")
+    click.echo(f"{'='*60}")
+
+    scorers = [
+        ExpectationsGuidelines(
+            model=judge_model_name,
+            name="follows_instructions",
+        ),
+        Safety(
+            model=judge_model_name,
+        ),
+    ]
+
+    with mlflow.start_run(
+        run_name=f"playbook-{model}-enterprise-{epoch}",
+        description=f"Enterprise evaluation for model {model}",
+        parent_run_id=parent_run_id,
+        nested=True,
+    ) as suite_run:
+        click.echo(f"Created enterprise run with ID: {suite_run.info.run_id}")
+        mlflow.autolog(disable=True)
+        results = mlflow.genai.evaluate(
+            data=data,
+            predict_fn=predict_fn,
+            scorers=scorers,
+        )
+        _log_token_usage(suite_run.info.run_id, parent_run_id)
+        mlflow.log_metrics(results.metrics, run_id=parent_run_id)
+
+
+def run_hallucination(
+    *,
+    model: str,
+    judge_model_name: str,
+    predict_fn: Callable,
+    data_dir: Path,
+    parent_run_id: str,
+    epoch: int,
+    limit: int | None = None,
+) -> None:
+    """Hallucination / groundedness evaluation."""
+    data_path = data_dir / "hallucination.json"
+    if not data_path.exists():
+        click.echo(f"⚠️  Skipping hallucination: {data_path} not found")
+        return
+
+    data = pd.read_json(data_path, orient="records")
+    if limit:
+        data = data.head(limit)
+
+    click.echo(f"\n{'='*60}")
+    click.echo(f"  Hallucination Evaluation  ({len(data)} cases)")
+    click.echo(f"{'='*60}")
+
+    scorers = [
+        ExpectationsGuidelines(
+            model=judge_model_name,
+            name="follows_instructions",
+        ),
+    ]
+
+    with mlflow.start_run(
+        run_name=f"playbook-{model}-hallucination-{epoch}",
+        description=f"Hallucination evaluation for model {model}",
+        parent_run_id=parent_run_id,
+        nested=True,
+    ) as suite_run:
+        click.echo(f"Created hallucination run with ID: {suite_run.info.run_id}")
+        results = mlflow.genai.evaluate(
+            data=data,
+            predict_fn=predict_fn,
+            scorers=scorers,
+        )
+        _log_token_usage(suite_run.info.run_id, parent_run_id)
+        mlflow.log_metrics(results.metrics, run_id=parent_run_id)
+
+
+def run_model(
+    *,
+    model: str,
+    judge_model_name: str,
+    predict_fn: Callable,
+    data_dir: Path,
+    parent_run_id: str,
+    epoch: int,
+    limit: int | None = None,
+) -> None:
+    """Model-quality evaluation (correctness, clarity, BLEU, ROUGE, …)."""
+    data_path = data_dir / "data.json"
+    if not data_path.exists():
+        click.echo(f"⚠️  Skipping model: {data_path} not found")
+        return
+
+    data = pd.read_json(data_path, orient="records")
+    if limit:
+        data = data.head(limit)
+
+    click.echo(f"\n{'='*60}")
+    click.echo(f"  Model Evaluation  ({len(data)} cases)")
+    click.echo(f"{'='*60}")
+
+    scorers = [
+        ExpectationsGuidelines(
+            model=judge_model_name,
+            name="follows_instructions",
+        ),
+        Safety(
+            model=judge_model_name,
+        ),
+        Correctness(
+            model=judge_model_name,
+        ),
+        bleu,
+        rouge,
+        cosine_similarity,
+    ]
+
+    with mlflow.start_run(
+        run_name=f"playbook-{model}-model-{epoch}",
+        description=f"Model quality evaluation for model {model}",
+        parent_run_id=parent_run_id,
+        nested=True,
+    ) as suite_run:
+        click.echo(f"Created model run with ID: {suite_run.info.run_id}")
+        results = mlflow.genai.evaluate(
+            data=data,
+            predict_fn=predict_fn,
+            scorers=scorers,
+        )
+        _log_token_usage(suite_run.info.run_id, parent_run_id)
+        mlflow.log_metrics(results.metrics, run_id=parent_run_id)
+
+
+def run_vision(
+    *,
+    model: str,
+    judge_model_name: str,
+    predict_fn: Callable,
+    data_dir: Path,
+    parent_run_id: str,
+    epoch: int,
+    limit: int | None = None,
+) -> None:
+    """Vision / multimodal evaluation (optional – skipped if no data file)."""
+    data_path = data_dir / "vision.json"
+    if not data_path.exists():
+        click.echo(f"⚠️  Skipping vision: {data_path} not found")
+        return
+
+    data = pd.read_json(data_path, orient="records")
+    if limit:
+        data = data.head(limit)
+
+    click.echo(f"\n{'='*60}")
+    click.echo(f"  Vision Evaluation  ({len(data)} cases)")
+    click.echo(f"{'='*60}")
+
+    scorers = [
+        Safety(
+            model=judge_model_name,
+        ),
+        Correctness(
+            model=judge_model_name,
+        ),
+        ExpectationsGuidelines(
+            model=judge_model_name,
+            name="follows_instructions",
+        ),
+        field_accuracy,
+    ]
+
+    with mlflow.start_run(
+        run_name=f"playbook-{model}-vision-{epoch}",
+        description=f"Vision evaluation for model {model}",
+        parent_run_id=parent_run_id,
+        nested=True,
+    ) as suite_run:
+        click.echo(f"Created vision run with ID: {suite_run.info.run_id}")
+        results = mlflow.genai.evaluate(
+            data=data,
+            predict_fn=predict_fn,
+            scorers=scorers,
+        )
+        _log_token_usage(suite_run.info.run_id, parent_run_id)
+        mlflow.log_metrics(results.metrics, run_id=parent_run_id)
+
+
+# Dispatch map for suite runners
+SUITE_RUNNERS: dict[str, Callable] = {
+    "enterprise": run_enterprise,
+    "hallucination": run_hallucination,
+    "model": run_model,
+    "vision": run_vision,
+}
+
+
+# =============================================================================
+# CLI
+# =============================================================================
+
+
 @click.command
 @click.option("--model", help="Model to evaluate", required=True)
 @click.option("--judge", help="Judge to use for evaluation", required=True)
@@ -485,10 +722,11 @@ def run_evaluations(
     default=None,
 )
 @click.option(
-    "--with-vision",
-    default=False,
-    help="Whether to include vision evaluations",
-    is_flag=True,
+    "--eval", "-e",
+    "evals",
+    multiple=True,
+    type=click.Choice(SUITE_ORDER, case_sensitive=False),
+    help="Evaluation suite(s) to run. Repeatable. If omitted, all suites run.",
 )
 @click.option(
     "--data-dir",
@@ -508,7 +746,7 @@ def evaluate(
     data_dir: str,
     provider: str = "openai",
     judge_provider: str | None = None,
-    with_vision: bool = False,
+    evals: tuple[str, ...] = (),
     limit: int | None = None,
 ):
     # Build configurations for model and judge
@@ -517,15 +755,27 @@ def evaluate(
         provider=judge_provider if judge_provider else provider
     )
 
+    # Resolve which suites to run, always in canonical order
+    requested = [e.lower() for e in evals] if evals else SUITE_ORDER
+    to_run = [s for s in SUITE_ORDER if s in requested]
+
+    if not to_run:
+        click.echo("No valid evaluation suites selected.")
+        raise SystemExit(1)
+
     print(
         f"Starting evaluation for model: {model} (provider: {model_config.provider}, api_base: {model_config.api_base})"
     )
     print(
         f"Using judge: {judge} (provider: {judge_config.provider}, api_base: {judge_config.api_base})"
     )
-    print(f"Options: with_vision={with_vision}, data_dir={data_dir}")
+    print(f"Suites: {', '.join(to_run)}")
+    if limit:
+        print(f"Limiting each dataset to {limit} entries for debugging")
 
     epoch_time = int(time.time())
+    data_path = Path(data_dir)
+
     with mlflow.start_run(run_name=f"playbook-{model}-{epoch_time}") as run:
         mlflow.log_params(
             {
@@ -536,30 +786,22 @@ def evaluate(
                 "model_api_base": model_config.api_base or "default",
                 "judge_api_base": judge_config.api_base or "default",
                 "run_date": datetime.datetime.now().isoformat(),
+                "suites": ",".join(to_run),
             }
         )
         print(f"Created parent run with ID: {run.info.run_id}")
-        enterpise_data = pd.read_json(
-            Path(data_dir) / "enterprise.json", orient="records"
-        )
-        hallucination_data = pd.read_json(
-            Path(data_dir) / "hallucination.json", orient="records"
-        )
-        vision_data = pd.read_json(Path(data_dir) / "vision.json", orient="records")
-        model_data = pd.read_json(Path(data_dir) / "data.json", orient="records")
 
-        # Limit data for debugging if --limit is set
-        if limit:
-            enterpise_data = enterpise_data.head(limit)
-            hallucination_data = hallucination_data.head(limit)
-            vision_data = vision_data.head(limit)
-            model_data = model_data.head(limit)
-            print(f"Limiting each dataset to {limit} entries for debugging")
-
-        mlflow.log_artifact(Path(data_dir) / "enterprise.json", artifact_path="data")
-        mlflow.log_artifact(Path(data_dir) / "hallucination.json", artifact_path="data")
-        mlflow.log_artifact(Path(data_dir) / "vision.json", artifact_path="data")
-        mlflow.log_artifact(Path(data_dir) / "data.json", artifact_path="data")
+        # Log data artifacts for the selected suites
+        suite_data_files = {
+            "enterprise": "enterprise.json",
+            "hallucination": "hallucination.json",
+            "model": "data.json",
+            "vision": "vision.json",
+        }
+        for suite_name in to_run:
+            artifact = data_path / suite_data_files[suite_name]
+            if artifact.exists():
+                mlflow.log_artifact(str(artifact), artifact_path="data")
 
         # Create agent (config will be applied during each invocation via predict_fn)
         agent = create_agent(model=to_langchain_model_name(model, model_config))
@@ -574,113 +816,20 @@ def evaluate(
                 with temporary_env(model_config):
                     return agent.invoke({"messages": messages})
 
-        with mlflow.start_run(
-            run_name=f"playbook-{model}-enterprise-{epoch_time}",
-            description=f"Comprehensive enterprise evaluation run for model {model} with judge {judge}",
-            parent_run_id=run.info.run_id,
-            nested=True,
-        ) as enterprise_run:
-            print(f"Created enterprise run with ID: {enterprise_run.info.run_id}")
-            enterprise_scorers = [
-                ExpectationsGuidelines(
-                    model=judge_model_name,
-                    name="follows_instructions",
-                ),
-                Safety(
-                    model=judge_model_name,
-                ),
-            ]
-            # Disable autolog to prevent tracing hangs
-            mlflow.autolog(disable=True)
-            results = mlflow.genai.evaluate(
-                data=enterpise_data,
+        # Run selected suites in canonical order
+        for suite_name in to_run:
+            click.echo(f"\n▶ Running suite: {suite_name}")
+            SUITE_RUNNERS[suite_name](
+                model=model,
+                judge_model_name=judge_model_name,
                 predict_fn=predict_fn,
-                scorers=enterprise_scorers,
-            )
-            mlflow.log_metrics(results.metrics, run_id=run.info.run_id)
-
-        # Hallucination evaluations
-        with mlflow.start_run(
-            run_name=f"playbook-{model}-hallucination-{epoch_time}",
-            description=f"Comprehensive hallucination evaluation run for model {model} with judge {judge}",
-            parent_run_id=run.info.run_id,
-            nested=True,
-        ) as hallucination_run:
-            print(f"Created hallucination run with ID: {hallucination_run.info.run_id}")
-            hallucination_scorers = [
-                ExpectationsGuidelines(
-                    model=judge_model_name,
-                    name="follows_instructions",
-                ),
-            ]
-            results = mlflow.genai.evaluate(
-                data=hallucination_data,
-                predict_fn=predict_fn,
-                scorers=hallucination_scorers,
-            )
-            mlflow.log_metrics(results.metrics, run_id=run.info.run_id)
-
-        # Vision evaluations
-        if with_vision:
-            with mlflow.start_run(
-                run_name=f"playbook-{model}-vision-{epoch_time}",
-                description=f"Comprehensive vision evaluation run for model {model} with judge {judge}",
+                data_dir=data_path,
                 parent_run_id=run.info.run_id,
-                nested=True,
-            ) as vision_run:
-                print(f"Created vision run with ID: {vision_run.info.run_id}")
-                vision_scorers = [
-                    Safety(
-                        model=judge_model_name,
-                    ),
-                    Correctness(
-                        model=judge_model_name,
-                    ),
-                    ExpectationsGuidelines(
-                        model=judge_model_name,
-                        name="follows_instructions",
-                    ),
-                    field_accuracy,
-                ]
-                results = mlflow.genai.evaluate(
-                    data=vision_data,
-                    predict_fn=predict_fn,
-                    scorers=vision_scorers,
-                )
-                mlflow.log_metrics(results.metrics, run_id=run.info.run_id)
-        # Model evaluations
-        with mlflow.start_run(
-            run_name=f"playbook-{model}-model-{epoch_time}",
-            description=f"Comprehensive model evaluation run for model {model} with judge {judge}",
-            parent_run_id=run.info.run_id,
-            nested=True,
-        ) as model_run:
-            print(f"Created model run with ID: {model_run.info.run_id}")
-            model_scorers = [
-                ExpectationsGuidelines(
-                    model=judge_model_name,
-                    name="follows_instructions",
-                ),
-                Safety(
-                    model=judge_model_name,
-                ),
-                Correctness(
-                    model=judge_model_name,
-                ),
-                bleu,
-                rouge,
-                cosine_similarity,
-            ]
-            results = mlflow.genai.evaluate(
-                data=model_data,
-                predict_fn=lambda messages: agent.invoke({"messages": messages}),
-                scorers=model_scorers,
+                epoch=epoch_time,
+                limit=limit,
             )
-            traces = mlflow.search_traces(
-                filter_string=f"run_id = '{model_run.info.run_id}'", return_type="list"
-            )
-            mlflow.log_metrics(avg_token_usage(traces))
-            mlflow.log_metrics(results.metrics, run_id=run.info.run_id)
+
+        click.echo(f"\n✅ All requested suites complete. Epoch: {epoch_time}")
 
 
 if __name__ == "__main__":
