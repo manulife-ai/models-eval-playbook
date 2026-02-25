@@ -20,8 +20,9 @@
 import datetime
 import json
 import os
-import time
 import threading
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -33,16 +34,9 @@ import numpy as np
 import pandas as pd
 from langchain.agents import create_agent
 from langchain_core.messages import BaseMessage
-from mlflow.genai.scorers import (
-    Correctness,
-    ExpectationsGuidelines,
-    Guidelines,
-    Safety,
-    Scorer,
-    scorer,
-)
+from mlflow.genai.scorers import (Correctness, ExpectationsGuidelines,
+                                  Guidelines, Safety, Scorer, scorer)
 from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
-from contextlib import contextmanager
 
 # =============================================================================
 # Model Configuration
@@ -809,12 +803,67 @@ def evaluate(
         # Get judge model name (applies judge config to env)
         judge_model_name = to_litellm_model_name(judge, judge_config)
 
+        def _detect_image_type(data: bytes) -> str:
+            """Detect actual image MIME type from magic bytes."""
+            if data[:3] == b"\xff\xd8\xff":
+                return "image/jpeg"
+            if data[:8] == b"\x89PNG\r\n\x1a\n":
+                return "image/png"
+            if data[:4] == b"GIF8":
+                return "image/gif"
+            if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+                return "image/webp"
+            return ""
+
+        def _url_to_data_uri(url: str) -> str:
+            """Download an image URL and return a base64 data URI."""
+            import base64
+            import mimetypes
+            import urllib.request
+            try:
+                with urllib.request.urlopen(url, timeout=30) as resp:
+                    data = resp.read()
+                    # Detect actual format from bytes; fall back to header/extension
+                    content_type = _detect_image_type(data)
+                    if not content_type:
+                        content_type = resp.headers.get("Content-Type", "")
+                    if not content_type:
+                        content_type, _ = mimetypes.guess_type(url)
+                        content_type = content_type or "image/png"
+                    b64 = base64.b64encode(data).decode("utf-8")
+                    return f"data:{content_type};base64,{b64}"
+            except Exception as e:
+                click.echo(f"⚠️  Could not convert URL to data URI: {url} ({e})")
+                return url  # fall back to original URL
+
+        def _sanitize_messages(messages):
+            """Strip unsupported fields and convert image URLs to base64 data URIs."""
+            sanitized = []
+            for msg in messages:
+                if isinstance(msg, dict):
+                    content = msg.get("content")
+                    if isinstance(content, list):
+                        new_content = []
+                        for part in content:
+                            if isinstance(part, dict) and part.get("type") == "image_url":
+                                # Remove unsupported 'detail' field
+                                part = {k: v for k, v in part.items() if k != "detail"}
+                                # Convert URL to base64 data URI for models that can't fetch URLs
+                                img = part.get("image_url", {})
+                                url = img.get("url", "")
+                                if url.startswith("http"):
+                                    part = {**part, "image_url": {**img, "url": _url_to_data_uri(url)}}
+                            new_content.append(part)
+                        msg = {**msg, "content": new_content}
+                sanitized.append(msg)
+            return sanitized
+
         predict_lock = threading.Lock()
         def predict_fn(messages):
             with predict_lock:
                 # Use model config during agent invocation to avoid using judge credentials
                 with temporary_env(model_config):
-                    return agent.invoke({"messages": messages})
+                    return agent.invoke({"messages": _sanitize_messages(messages)})
 
         # Run selected suites in canonical order
         for suite_name in to_run:
