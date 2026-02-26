@@ -863,7 +863,8 @@ def evaluate(
             with predict_lock:
                 # Use model config during agent invocation to avoid using judge credentials
                 with temporary_env(model_config):
-                    return agent.invoke({"messages": _sanitize_messages(messages)})
+                    result = agent.invoke({"messages": _sanitize_messages(messages)})
+                    return result if result and str(result).strip() else "[Model returned empty response]"
 
         # Run selected suites in canonical order
         for suite_name in to_run:
