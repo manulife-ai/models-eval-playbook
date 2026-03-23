@@ -158,6 +158,59 @@ def flatten_json(obj, parent_key: str = "", sep: str = ".") -> dict:
     return items
 
 
+def preflight_check(
+    model: str,
+    judge: str,
+    model_config: ModelConfig,
+    judge_config: ModelConfig,
+) -> None:
+    """Verify both model and judge are reachable before starting evaluation.
+
+    Sends a trivial completion request to each endpoint. Raises SystemExit
+    on failure so the user gets immediate feedback instead of silent scorer
+    errors buried in MLflow assessments.
+    """
+    from openai import APIStatusError, OpenAI
+
+    # Errors that prove the model exists (it responded, just not how we wanted)
+    REACHABLE_INDICATORS = [
+        "content_policy", "ContentPolicyViolation",
+        "content management policy", "maximum context length",
+        "rate limit", "Rate limit", "429", "quota",
+        "max_tokens", "max_completion_tokens", "model output limit",
+    ]
+
+    checks = [
+        ("Model", model, model_config),
+        ("Judge", judge, judge_config),
+    ]
+    for label, name, config in checks:
+        click.echo(f"  Checking {label} ({name})...", nl=False)
+        try:
+            client = OpenAI(
+                api_key=config.api_key or "dummy",
+                base_url=config.api_base,
+            )
+            client.chat.completions.create(
+                model=name,
+                messages=[{"role": "user", "content": "Say OK"}],
+                max_completion_tokens=1,
+            )
+            click.echo(" OK")
+        except APIStatusError as e:
+            err_text = str(e)
+            if any(indicator in err_text for indicator in REACHABLE_INDICATORS):
+                click.echo(" OK (reachable)")
+            else:
+                click.echo(" FAILED")
+                click.echo(f"\n❌ {label} '{name}' is not reachable: {e.message}")
+                raise SystemExit(1)
+        except Exception as e:
+            click.echo(" FAILED")
+            click.echo(f"\n❌ {label} '{name}' is not reachable: {e}")
+            raise SystemExit(1)
+
+
 def to_langchain_model_name(model: str, config: ModelConfig) -> str:
     """Format model name for LangChain.
 
@@ -642,15 +695,19 @@ def evaluate(
         click.echo("No valid evaluation suites selected.")
         raise SystemExit(1)
 
-    print(
+    click.echo(
         f"Starting evaluation for model: {model} (provider: {model_config.provider}, api_base: {model_config.api_base})"
     )
-    print(
+    click.echo(
         f"Using judge: {judge} (provider: {judge_config.provider}, api_base: {judge_config.api_base})"
     )
-    print(f"Suites: {', '.join(to_run)}")
+    click.echo(f"Suites: {', '.join(to_run)}")
     if limit:
-        print(f"Limiting each dataset to {limit} entries for debugging")
+        click.echo(f"Limiting each dataset to {limit} entries for debugging")
+
+    click.echo("\nPre-flight connectivity check:")
+    preflight_check(model, judge, model_config, judge_config)
+    click.echo()
 
     epoch_time = int(time.time())
     data_path = Path(data_dir)
