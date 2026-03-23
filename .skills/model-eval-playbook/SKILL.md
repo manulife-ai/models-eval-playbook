@@ -47,14 +47,17 @@ uv run playbook.py \
   --provider <provider> \
   --judge-provider <judge-provider> \
   [--eval <suites>] \
-  [--limit N]
+  [--limit N] \
+  [--sequential] \
+  [--max-concurrent N]
 ```
 
 - Omit `--eval` to run default suites (enterprise, hallucination, model)
 - Use `--eval all` to run all suites including vision
 - Use `--eval enterprise,vision` to run specific suites (comma-separated)
 - Use `--limit N` for debugging (limits test cases per suite)
-- Suites always execute in canonical order regardless of flag order
+- Suites run in parallel by default (2 at a time); use `--sequential` for one-at-a-time
+- Use `--max-concurrent N` to control concurrent predict\_fn calls (default: 10)
 
 ### Run structure
 

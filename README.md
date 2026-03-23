@@ -57,8 +57,8 @@ databricks auth login --profile <DATABRICKS_AUTH_PROFILE> --host <DATABRICKS_URL
 
 ### Run Default Suites
 
-When no `--eval` flag is provided, three suites run in canonical order:
-**enterprise → hallucination → model** (vision is excluded by default).
+When no `--eval` flag is provided, three suites run **in parallel**:
+**enterprise, hallucination, model** (vision is excluded by default).
 
 ```bash
 uv run playbook.py --model "openai/gpt-4o" --judge "openai/gpt-4o"
@@ -105,16 +105,17 @@ uv run playbook.py --model "google/gemini-3-flash-preview" --judge "gpt-5.2" --l
 | `model` | `data/data.json` | General model quality — correctness, clarity, BLEU, ROUGE, cosine similarity |
 | `vision` | `data/vision.json` | Multimodal / vision evaluation (optional — skipped if data file is absent) |
 
-### Canonical Execution Order
+### Parallel Execution
 
-Suites always run in this fixed order, regardless of how they are specified on the command line:
+By default, suites run in parallel (2 at a time). This is safe because each
+suite creates its own MLflow child run and the model agent carries baked-in
+credentials (no environment variable swapping).
 
-```
-enterprise → hallucination → model → vision
-```
+Use `--sequential` for the old one-at-a-time behavior. Use `--max-concurrent`
+to control how many predict\_fn calls can run simultaneously across all suites.
 
 If a suite's data file is missing, that suite is skipped with a warning.
-If any suite fails, the run aborts immediately.
+If any suite fails, the run aborts immediately (fail-fast).
 
 ### Command Options
 
@@ -126,6 +127,8 @@ If any suite fails, the run aborts immediately.
 | `--judge-provider` | | | Provider for the judge model (default: same as `--provider`) |
 | `--eval` | `-e` | | Comma-separated suites or `all`. Default: `enterprise,hallucination,model` |
 | `--limit` | | | Limit number of test cases per dataset (useful for debugging) |
+| `--sequential` | | | Run suites one at a time instead of in parallel |
+| `--max-concurrent` | `-c` | | Max concurrent predict\_fn calls across all suites (default: `10`) |
 | `--data-dir` | | | Path to test data directory (default: `./data`) |
 
 ## MLflow Run Structure

@@ -14,12 +14,12 @@
 #     "scikit-learn",
 # ]
 # ///
+import concurrent.futures
 import datetime
 import json
 import os
 import threading
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -30,6 +30,7 @@ import mlflow
 import numpy as np
 import pandas as pd
 from langchain.agents import create_agent
+from langchain.chat_models import init_chat_model
 from langchain_core.messages import BaseMessage
 from mlflow.genai.scorers import (Correctness, ExpectationsGuidelines,
                                   Guidelines, Safety, Scorer, scorer)
@@ -160,16 +161,11 @@ def flatten_json(obj, parent_key: str = "", sep: str = ".") -> dict:
 
 
 def to_langchain_model_name(model: str, config: ModelConfig) -> str:
-    """Format model name for LangChain and apply config to environment.
-
-    Args:
-        model: The model name/identifier
-        config: ModelConfig with provider and API credentials
+    """Format model name for LangChain.
 
     Returns:
         Formatted model name for LangChain (provider:model)
     """
-    config.apply_to_env()
     return f"{config.provider}:{model}"
 
 
@@ -186,33 +182,6 @@ def to_litellm_model_name(model: str, config: ModelConfig) -> str:
     config.apply_to_env()
     return f"{config.provider}:/{model}"
 
-
-@contextmanager
-def temporary_env(config: ModelConfig):
-    """Temporarily apply a config's environment variables, then restore previous values.
-
-    This ensures that the model agent uses model credentials even if judge credentials
-    were applied to environment variables afterwards.
-    """
-    # Save current env vars
-    saved_env = {}
-    env_vars = config.to_env_vars()
-
-    for key in env_vars.keys():
-        saved_env[key] = os.environ.get(key)
-
-    # Apply new config
-    config.apply_to_env()
-
-    try:
-        yield
-    finally:
-        # Restore previous values
-        for key, value in saved_env.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
 
 
 def avg_token_usage(traces) -> dict[str, float]:
@@ -472,14 +441,22 @@ SUITE_ORDER: list[str] = ["enterprise", "hallucination", "model", "vision"]
 DEFAULT_SUITES: list[str] = ["enterprise", "hallucination", "model"]
 
 
-def _log_token_usage(run_id: str, parent_run_id: str) -> None:
+def _log_token_usage(
+    run_id: str,
+    parent_run_id: str,
+    parent_metrics_lock=None,
+) -> None:
     """Search traces for a run and log avg token usage to both child and parent."""
     traces = mlflow.search_traces(
         filter_string=f"run_id = '{run_id}'", return_type="list"
     )
     token_metrics = avg_token_usage(traces)
     mlflow.log_metrics(token_metrics)
-    mlflow.log_metrics(token_metrics, run_id=parent_run_id)
+    if parent_metrics_lock:
+        with parent_metrics_lock:
+            mlflow.log_metrics(token_metrics, run_id=parent_run_id)
+    else:
+        mlflow.log_metrics(token_metrics, run_id=parent_run_id)
 
 
 def run_enterprise(
@@ -491,6 +468,7 @@ def run_enterprise(
     parent_run_id: str,
     epoch: int,
     limit: int | None = None,
+    parent_metrics_lock=None,
 ) -> None:
     """Enterprise-policy evaluation (brand safety, regulatory, privacy, …)."""
     data_path = data_dir / "enterprise.json"
@@ -529,8 +507,12 @@ def run_enterprise(
             predict_fn=predict_fn,
             scorers=scorers,
         )
-        _log_token_usage(suite_run.info.run_id, parent_run_id)
-        mlflow.log_metrics(results.metrics, run_id=parent_run_id)
+        _log_token_usage(suite_run.info.run_id, parent_run_id, parent_metrics_lock)
+        if parent_metrics_lock:
+            with parent_metrics_lock:
+                mlflow.log_metrics(results.metrics, run_id=parent_run_id)
+        else:
+            mlflow.log_metrics(results.metrics, run_id=parent_run_id)
 
 
 def run_hallucination(
@@ -542,6 +524,7 @@ def run_hallucination(
     parent_run_id: str,
     epoch: int,
     limit: int | None = None,
+    parent_metrics_lock=None,
 ) -> None:
     """Hallucination / groundedness evaluation."""
     data_path = data_dir / "hallucination.json"
@@ -576,8 +559,12 @@ def run_hallucination(
             predict_fn=predict_fn,
             scorers=scorers,
         )
-        _log_token_usage(suite_run.info.run_id, parent_run_id)
-        mlflow.log_metrics(results.metrics, run_id=parent_run_id)
+        _log_token_usage(suite_run.info.run_id, parent_run_id, parent_metrics_lock)
+        if parent_metrics_lock:
+            with parent_metrics_lock:
+                mlflow.log_metrics(results.metrics, run_id=parent_run_id)
+        else:
+            mlflow.log_metrics(results.metrics, run_id=parent_run_id)
 
 
 def run_model(
@@ -589,6 +576,7 @@ def run_model(
     parent_run_id: str,
     epoch: int,
     limit: int | None = None,
+    parent_metrics_lock=None,
 ) -> None:
     """Model-quality evaluation (correctness, clarity, BLEU, ROUGE, …)."""
     data_path = data_dir / "data.json"
@@ -632,8 +620,12 @@ def run_model(
             predict_fn=predict_fn,
             scorers=scorers,
         )
-        _log_token_usage(suite_run.info.run_id, parent_run_id)
-        mlflow.log_metrics(results.metrics, run_id=parent_run_id)
+        _log_token_usage(suite_run.info.run_id, parent_run_id, parent_metrics_lock)
+        if parent_metrics_lock:
+            with parent_metrics_lock:
+                mlflow.log_metrics(results.metrics, run_id=parent_run_id)
+        else:
+            mlflow.log_metrics(results.metrics, run_id=parent_run_id)
 
 
 def run_vision(
@@ -645,6 +637,7 @@ def run_vision(
     parent_run_id: str,
     epoch: int,
     limit: int | None = None,
+    parent_metrics_lock=None,
 ) -> None:
     """Vision / multimodal evaluation (optional – skipped if no data file)."""
     data_path = data_dir / "vision.json"
@@ -686,8 +679,12 @@ def run_vision(
             predict_fn=predict_fn,
             scorers=scorers,
         )
-        _log_token_usage(suite_run.info.run_id, parent_run_id)
-        mlflow.log_metrics(results.metrics, run_id=parent_run_id)
+        _log_token_usage(suite_run.info.run_id, parent_run_id, parent_metrics_lock)
+        if parent_metrics_lock:
+            with parent_metrics_lock:
+                mlflow.log_metrics(results.metrics, run_id=parent_run_id)
+        else:
+            mlflow.log_metrics(results.metrics, run_id=parent_run_id)
 
 
 # Dispatch map for suite runners
@@ -752,6 +749,19 @@ def parse_eval(ctx, param, value: str | None) -> list[str]:
     type=int,
     help="Limit number of test cases per dataset (useful for debugging)",
 )
+@click.option(
+    "--sequential",
+    is_flag=True,
+    default=False,
+    help="Run suites sequentially instead of in parallel",
+)
+@click.option(
+    "--max-concurrent",
+    "-c",
+    default=10,
+    type=int,
+    help="Max concurrent predict_fn calls across all suites (default: 10)",
+)
 def evaluate(
     model: str,
     judge: str,
@@ -760,6 +770,8 @@ def evaluate(
     judge_provider: str | None = None,
     evals: list[str] = None,
     limit: int | None = None,
+    sequential: bool = False,
+    max_concurrent: int = 10,
 ):
     # Build configurations for model and judge
     model_config = load_model_config(provider=provider)
@@ -814,8 +826,18 @@ def evaluate(
             if artifact.exists():
                 mlflow.log_artifact(str(artifact), artifact_path="data")
 
-        # Create agent (config will be applied during each invocation via predict_fn)
-        agent = create_agent(model=to_langchain_model_name(model, model_config))
+        # Create agent with credentials baked into the model instance
+        # (no env-var dependency → safe for concurrent predict_fn calls)
+        model_kwargs = {}
+        if model_config.api_key:
+            model_kwargs["api_key"] = model_config.api_key
+        if model_config.api_base:
+            model_kwargs["base_url"] = model_config.api_base
+        chat_model = init_chat_model(
+            to_langchain_model_name(model, model_config),
+            **model_kwargs,
+        )
+        agent = create_agent(model=chat_model)
 
         # Get judge model name (applies judge config to env)
         judge_model_name = to_litellm_model_name(judge, judge_config)
@@ -875,26 +897,56 @@ def evaluate(
                 sanitized.append(msg)
             return sanitized
 
-        predict_lock = threading.Lock()
-        def predict_fn(messages):
-            with predict_lock:
-                # Use model config during agent invocation to avoid using judge credentials
-                with temporary_env(model_config):
-                    result = agent.invoke({"messages": _sanitize_messages(messages)})
-                    return result if result and str(result).strip() else "[Model returned empty response]"
+        concurrency_sem = threading.Semaphore(max_concurrent)
 
-        # Run selected suites in canonical order
-        for suite_name in to_run:
+        def predict_fn(messages):
+            with concurrency_sem:
+                result = agent.invoke({"messages": _sanitize_messages(messages)})
+                return result if result and str(result).strip() else "[Model returned empty response]"
+
+        # Run selected suites
+        parent_metrics_lock = threading.Lock()
+        suite_kwargs = dict(
+            model=model,
+            judge_model_name=judge_model_name,
+            predict_fn=predict_fn,
+            data_dir=data_path,
+            parent_run_id=run.info.run_id,
+            epoch=epoch_time,
+            limit=limit,
+            parent_metrics_lock=parent_metrics_lock,
+        )
+
+        def _run_suite(suite_name: str) -> None:
             click.echo(f"\n▶ Running suite: {suite_name}")
-            SUITE_RUNNERS[suite_name](
-                model=model,
-                judge_model_name=judge_model_name,
-                predict_fn=predict_fn,
-                data_dir=data_path,
-                parent_run_id=run.info.run_id,
-                epoch=epoch_time,
-                limit=limit,
+            SUITE_RUNNERS[suite_name](**suite_kwargs)
+
+        if sequential:
+            for suite_name in to_run:
+                _run_suite(suite_name)
+        else:
+            # MLflow evaluate() has internal contention with 3+ concurrent
+            # calls, so cap parallel suite workers at 2.
+            workers = min(2, len(to_run))
+            click.echo(
+                f"Running {len(to_run)} suites in parallel "
+                f"({workers} at a time, max-concurrent={max_concurrent})"
             )
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=workers,
+            ) as pool:
+                futures = {
+                    pool.submit(_run_suite, name): name for name in to_run
+                }
+                for future in concurrent.futures.as_completed(futures):
+                    suite = futures[future]
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        click.echo(f"\n❌ Suite '{suite}' failed: {exc}")
+                        for f in futures:
+                            f.cancel()
+                        raise
 
         click.echo(f"\n✅ All requested suites complete. Epoch: {epoch_time}")
 
