@@ -539,6 +539,7 @@ def run_hallucination(
         nested=True,
     ) as suite_run:
         click.echo(f"Created hallucination run with ID: {suite_run.info.run_id}")
+        mlflow.autolog(disable=True)
         results = mlflow.genai.evaluate(
             data=data,
             predict_fn=predict_fn,
@@ -595,6 +596,7 @@ def run_model(
         nested=True,
     ) as suite_run:
         click.echo(f"Created model run with ID: {suite_run.info.run_id}")
+        mlflow.autolog(disable=True)
         results = mlflow.genai.evaluate(
             data=data,
             predict_fn=predict_fn,
@@ -649,6 +651,7 @@ def run_vision(
         nested=True,
     ) as suite_run:
         click.echo(f"Created vision run with ID: {suite_run.info.run_id}")
+        mlflow.autolog(disable=True)
         results = mlflow.genai.evaluate(
             data=data,
             predict_fn=predict_fn,
