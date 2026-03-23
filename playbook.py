@@ -378,11 +378,12 @@ def run_enterprise(
     ) as suite_run:
         click.echo(f"Created enterprise run with ID: {suite_run.info.run_id}")
         mlflow.autolog(disable=True)
-        mlflow.genai.evaluate(
+        results = mlflow.genai.evaluate(
             data=data,
             predict_fn=predict_fn,
             scorers=scorers,
         )
+        mlflow.log_metrics(results.metrics)
         _log_token_usage(suite_run.info.run_id)
 
 
@@ -426,11 +427,12 @@ def run_hallucination(
     ) as suite_run:
         click.echo(f"Created hallucination run with ID: {suite_run.info.run_id}")
         mlflow.autolog(disable=True)
-        mlflow.genai.evaluate(
+        results = mlflow.genai.evaluate(
             data=data,
             predict_fn=predict_fn,
             scorers=scorers,
         )
+        mlflow.log_metrics(results.metrics)
         _log_token_usage(suite_run.info.run_id)
 
 
@@ -483,11 +485,12 @@ def run_model(
     ) as suite_run:
         click.echo(f"Created model run with ID: {suite_run.info.run_id}")
         mlflow.autolog(disable=True)
-        mlflow.genai.evaluate(
+        results = mlflow.genai.evaluate(
             data=data,
             predict_fn=predict_fn,
             scorers=scorers,
         )
+        mlflow.log_metrics(results.metrics)
         _log_token_usage(suite_run.info.run_id)
 
 
@@ -538,11 +541,12 @@ def run_vision(
     ) as suite_run:
         click.echo(f"Created vision run with ID: {suite_run.info.run_id}")
         mlflow.autolog(disable=True)
-        mlflow.genai.evaluate(
+        results = mlflow.genai.evaluate(
             data=data,
             predict_fn=predict_fn,
             scorers=scorers,
         )
+        mlflow.log_metrics(results.metrics)
         _log_token_usage(suite_run.info.run_id)
 
 
