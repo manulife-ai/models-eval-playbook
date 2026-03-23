@@ -21,7 +21,6 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Callable
 
 import click
@@ -32,7 +31,7 @@ from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import BaseMessage
 from mlflow.genai.scorers import (Correctness, ExpectationsGuidelines,
-                                  Guidelines, Safety, Scorer, scorer)
+                                  Safety, scorer)
 from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
 
 # =============================================================================
@@ -185,11 +184,15 @@ def to_litellm_model_name(model: str, config: ModelConfig) -> str:
 
 def avg_token_usage(traces) -> dict[str, float]:
     usg = {}
+    n = 0
     for trace in traces:
         if total_usage := trace.info.token_usage:
+            n += 1
             for key, value in total_usage.items():
                 usg[key] = usg.get(key, 0) + value
-    return {f"avg_{key}": value / len(traces) for key, value in usg.items()}
+    if n == 0:
+        return {}
+    return {f"avg_{key}": value / n for key, value in usg.items()}
 
 
 @scorer(
@@ -312,124 +315,6 @@ def field_accuracy(outputs, expectations) -> float | None:
     return (correct_fields / total_fields) * 100
 
 
-def run_evaluations(
-    model: str,
-    judge: str,
-    data: pd.DataFrame,
-    predict_fn: Callable,
-    scorers: list[Scorer] = [],
-    model_config: ModelConfig | None = None,
-    judge_config: ModelConfig | None = None,
-) -> pd.DataFrame:
-    """Run evaluations with separate model and judge configurations.
-
-    Args:
-        model: Name of the model being tested
-        judge: Name of the judge model
-        data: DataFrame with test cases
-        predict_fn: Function to get predictions from the model
-        scorers: Additional scorers to use
-        model_config: Configuration for the tested model (loads from env if None)
-        judge_config: Configuration for the judge model (loads from env if None)
-    """
-    # Load configs from environment if not provided
-    if model_config is None:
-        model_config = load_model_config()
-    if judge_config is None:
-        judge_config = load_judge_config()
-
-    epoch_time = int(time.time())
-    with mlflow.start_run(
-        run_name=f"playbook-eval-{model}-{epoch_time}",
-        description=f"Evaluation run for model {model} with judge {judge}",
-    ) as run:
-        mlflow.log_params(
-            {
-                "model": model,
-                "judge": judge,
-                "model_provider": model_config.provider,
-                "judge_provider": judge_config.provider,
-                "model_api_base": model_config.api_base or "default",
-                "judge_api_base": judge_config.api_base or "default",
-                "run_date": datetime.datetime.now().isoformat(),
-                "num_cases": len(data),
-            }
-        )
-        with TemporaryDirectory(delete=True) as temp_dir:
-            temp_file = f"{temp_dir}/evaluation.json"
-            data.to_json(temp_file, orient="records")
-            mlflow.log_artifact(temp_file, artifact_path="data")
-
-        # Get judge model name (applies judge config to env)
-        judge_model_name = to_litellm_model_name(judge, judge_config)
-
-        # Define the evaluation functions or scorers here
-        safety = Safety(
-            model=judge_model_name,
-        )
-        correctness = Correctness(
-            model=judge_model_name,
-        )
-        clarity = Guidelines(
-            model=judge_model_name,
-            name="clarity",
-            guidelines=["The response must be clear, coherent, and concise"],
-        )
-        english = Guidelines(
-            model=judge_model_name,
-            name="follows_user_language_preference",
-            guidelines=[
-                "The response must be in the exact same language as the user's original input",
-            ],
-        )
-
-        @scorer(
-            name="follows_guidelines",
-            description="Checks if the response follows provided guidelines",
-        )
-        def follows_guidelines(inputs, outputs, expectations) -> bool:
-            if "guidelines" in expectations:
-                guidelines = ExpectationsGuidelines(
-                    model=judge_model_name,
-                    name="follows_instructions",
-                )
-                return guidelines(
-                    inputs=inputs, outputs=outputs, expectations=expectations
-                )
-            return True
-
-        # Run Evaluations
-        results = mlflow.genai.evaluate(
-            data=data,
-            predict_fn=predict_fn,
-            scorers=[
-                # Enterprise level scorers
-                safety,
-                clarity,
-                english,
-                # Average token usage will be logged separately (see below)
-                # Model level scorers
-                correctness,
-                follows_guidelines,
-                # Pattern level scorers
-                bleu,
-                rouge,
-                cosine_similarity,
-                # Usecase level scorers
-                *scorers,
-            ],
-        )
-        run_id = run.info.run_id
-        traces = mlflow.search_traces(
-            filter_string=f"run_id = '{run_id}'", return_type="list"
-        )
-        mlflow.log_metrics(avg_token_usage(traces))
-        print(
-            f"Logged evaluation run {run.info.run_id} for model {model} using judge {judge}."
-        )
-        print(f"{len(traces)} traces are available for this run.")
-        return results
-
 
 # =============================================================================
 # Suite Runners
@@ -440,14 +325,14 @@ SUITE_ORDER: list[str] = ["enterprise", "hallucination", "model", "vision"]
 DEFAULT_SUITES: list[str] = ["enterprise", "hallucination", "model"]
 
 
-def _log_token_usage(run_id: str, parent_run_id: str) -> None:
-    """Search traces for a run and log avg token usage to both child and parent."""
+def _log_token_usage(run_id: str) -> None:
+    """Search traces for a run and log avg token usage to the child run."""
     traces = mlflow.search_traces(
         filter_string=f"run_id = '{run_id}'", return_type="list"
     )
     token_metrics = avg_token_usage(traces)
-    mlflow.log_metrics(token_metrics)
-    mlflow.log_metrics(token_metrics, run_id=parent_run_id)
+    if token_metrics:
+        mlflow.log_metrics(token_metrics)
 
 
 def run_enterprise(
@@ -489,16 +374,16 @@ def run_enterprise(
         description=f"Enterprise evaluation for model {model}",
         parent_run_id=parent_run_id,
         nested=True,
+        tags={"suite": "enterprise"},
     ) as suite_run:
         click.echo(f"Created enterprise run with ID: {suite_run.info.run_id}")
         mlflow.autolog(disable=True)
-        results = mlflow.genai.evaluate(
+        mlflow.genai.evaluate(
             data=data,
             predict_fn=predict_fn,
             scorers=scorers,
         )
-        _log_token_usage(suite_run.info.run_id, parent_run_id)
-        mlflow.log_metrics(results.metrics, run_id=parent_run_id)
+        _log_token_usage(suite_run.info.run_id)
 
 
 def run_hallucination(
@@ -537,16 +422,16 @@ def run_hallucination(
         description=f"Hallucination evaluation for model {model}",
         parent_run_id=parent_run_id,
         nested=True,
+        tags={"suite": "hallucination"},
     ) as suite_run:
         click.echo(f"Created hallucination run with ID: {suite_run.info.run_id}")
         mlflow.autolog(disable=True)
-        results = mlflow.genai.evaluate(
+        mlflow.genai.evaluate(
             data=data,
             predict_fn=predict_fn,
             scorers=scorers,
         )
-        _log_token_usage(suite_run.info.run_id, parent_run_id)
-        mlflow.log_metrics(results.metrics, run_id=parent_run_id)
+        _log_token_usage(suite_run.info.run_id)
 
 
 def run_model(
@@ -594,16 +479,16 @@ def run_model(
         description=f"Model quality evaluation for model {model}",
         parent_run_id=parent_run_id,
         nested=True,
+        tags={"suite": "model"},
     ) as suite_run:
         click.echo(f"Created model run with ID: {suite_run.info.run_id}")
         mlflow.autolog(disable=True)
-        results = mlflow.genai.evaluate(
+        mlflow.genai.evaluate(
             data=data,
             predict_fn=predict_fn,
             scorers=scorers,
         )
-        _log_token_usage(suite_run.info.run_id, parent_run_id)
-        mlflow.log_metrics(results.metrics, run_id=parent_run_id)
+        _log_token_usage(suite_run.info.run_id)
 
 
 def run_vision(
@@ -649,16 +534,16 @@ def run_vision(
         description=f"Vision evaluation for model {model}",
         parent_run_id=parent_run_id,
         nested=True,
+        tags={"suite": "vision"},
     ) as suite_run:
         click.echo(f"Created vision run with ID: {suite_run.info.run_id}")
         mlflow.autolog(disable=True)
-        results = mlflow.genai.evaluate(
+        mlflow.genai.evaluate(
             data=data,
             predict_fn=predict_fn,
             scorers=scorers,
         )
-        _log_token_usage(suite_run.info.run_id, parent_run_id)
-        mlflow.log_metrics(results.metrics, run_id=parent_run_id)
+        _log_token_usage(suite_run.info.run_id)
 
 
 # Dispatch map for suite runners
@@ -868,8 +753,11 @@ def evaluate(
 
         def predict_fn(messages):
             with concurrency_sem:
-                result = agent.invoke({"messages": _sanitize_messages(messages)})
-                return result if result and str(result).strip() else "[Model returned empty response]"
+                try:
+                    result = agent.invoke({"messages": _sanitize_messages(messages)})
+                    return result if result and str(result).strip() else "[Model returned empty response]"
+                except Exception as e:
+                    return f"[Model error: {e}]"
 
         # Run selected suites sequentially.
         # MLflow's evaluate() parallelizes predict_fn calls internally;
@@ -888,6 +776,8 @@ def evaluate(
                 limit=limit,
             )
 
+        # Mark run as complete so report.py can identify fully successful runs
+        mlflow.set_tag("playbook.status", "complete")
         click.echo(f"\n✅ All requested suites complete. Epoch: {epoch_time}")
 
 
