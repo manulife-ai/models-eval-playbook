@@ -19,7 +19,6 @@ import json
 import os
 import threading
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -30,6 +29,7 @@ import mlflow
 import numpy as np
 import pandas as pd
 from langchain.agents import create_agent
+from langchain.chat_models import init_chat_model
 from langchain_core.messages import BaseMessage
 from mlflow.genai.scorers import (Correctness, ExpectationsGuidelines,
                                   Guidelines, Safety, Scorer, scorer)
@@ -160,16 +160,11 @@ def flatten_json(obj, parent_key: str = "", sep: str = ".") -> dict:
 
 
 def to_langchain_model_name(model: str, config: ModelConfig) -> str:
-    """Format model name for LangChain and apply config to environment.
-
-    Args:
-        model: The model name/identifier
-        config: ModelConfig with provider and API credentials
+    """Format model name for LangChain.
 
     Returns:
         Formatted model name for LangChain (provider:model)
     """
-    config.apply_to_env()
     return f"{config.provider}:{model}"
 
 
@@ -186,33 +181,6 @@ def to_litellm_model_name(model: str, config: ModelConfig) -> str:
     config.apply_to_env()
     return f"{config.provider}:/{model}"
 
-
-@contextmanager
-def temporary_env(config: ModelConfig):
-    """Temporarily apply a config's environment variables, then restore previous values.
-
-    This ensures that the model agent uses model credentials even if judge credentials
-    were applied to environment variables afterwards.
-    """
-    # Save current env vars
-    saved_env = {}
-    env_vars = config.to_env_vars()
-
-    for key in env_vars.keys():
-        saved_env[key] = os.environ.get(key)
-
-    # Apply new config
-    config.apply_to_env()
-
-    try:
-        yield
-    finally:
-        # Restore previous values
-        for key, value in saved_env.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
 
 
 def avg_token_usage(traces) -> dict[str, float]:
@@ -571,6 +539,7 @@ def run_hallucination(
         nested=True,
     ) as suite_run:
         click.echo(f"Created hallucination run with ID: {suite_run.info.run_id}")
+        mlflow.autolog(disable=True)
         results = mlflow.genai.evaluate(
             data=data,
             predict_fn=predict_fn,
@@ -627,6 +596,7 @@ def run_model(
         nested=True,
     ) as suite_run:
         click.echo(f"Created model run with ID: {suite_run.info.run_id}")
+        mlflow.autolog(disable=True)
         results = mlflow.genai.evaluate(
             data=data,
             predict_fn=predict_fn,
@@ -681,6 +651,7 @@ def run_vision(
         nested=True,
     ) as suite_run:
         click.echo(f"Created vision run with ID: {suite_run.info.run_id}")
+        mlflow.autolog(disable=True)
         results = mlflow.genai.evaluate(
             data=data,
             predict_fn=predict_fn,
@@ -752,6 +723,13 @@ def parse_eval(ctx, param, value: str | None) -> list[str]:
     type=int,
     help="Limit number of test cases per dataset (useful for debugging)",
 )
+@click.option(
+    "--max-concurrent",
+    "-c",
+    default=10,
+    type=int,
+    help="Max concurrent predict_fn calls across all suites (default: 10)",
+)
 def evaluate(
     model: str,
     judge: str,
@@ -760,6 +738,7 @@ def evaluate(
     judge_provider: str | None = None,
     evals: list[str] = None,
     limit: int | None = None,
+    max_concurrent: int = 10,
 ):
     # Build configurations for model and judge
     model_config = load_model_config(provider=provider)
@@ -814,8 +793,18 @@ def evaluate(
             if artifact.exists():
                 mlflow.log_artifact(str(artifact), artifact_path="data")
 
-        # Create agent (config will be applied during each invocation via predict_fn)
-        agent = create_agent(model=to_langchain_model_name(model, model_config))
+        # Create agent with credentials baked into the model instance
+        # (no env-var dependency → safe for concurrent predict_fn calls)
+        model_kwargs = {}
+        if model_config.api_key:
+            model_kwargs["api_key"] = model_config.api_key
+        if model_config.api_base:
+            model_kwargs["base_url"] = model_config.api_base
+        chat_model = init_chat_model(
+            to_langchain_model_name(model, model_config),
+            **model_kwargs,
+        )
+        agent = create_agent(model=chat_model)
 
         # Get judge model name (applies judge config to env)
         judge_model_name = to_litellm_model_name(judge, judge_config)
@@ -875,15 +864,18 @@ def evaluate(
                 sanitized.append(msg)
             return sanitized
 
-        predict_lock = threading.Lock()
-        def predict_fn(messages):
-            with predict_lock:
-                # Use model config during agent invocation to avoid using judge credentials
-                with temporary_env(model_config):
-                    result = agent.invoke({"messages": _sanitize_messages(messages)})
-                    return result if result and str(result).strip() else "[Model returned empty response]"
+        concurrency_sem = threading.Semaphore(max_concurrent)
 
-        # Run selected suites in canonical order
+        def predict_fn(messages):
+            with concurrency_sem:
+                result = agent.invoke({"messages": _sanitize_messages(messages)})
+                return result if result and str(result).strip() else "[Model returned empty response]"
+
+        # Run selected suites sequentially.
+        # MLflow's evaluate() parallelizes predict_fn calls internally;
+        # the semaphore above controls concurrency. Inter-suite parallelism
+        # is not used because MLflow's trace manager singleton causes
+        # contention/data loss when multiple evaluate() calls overlap.
         for suite_name in to_run:
             click.echo(f"\n▶ Running suite: {suite_name}")
             SUITE_RUNNERS[suite_name](

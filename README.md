@@ -57,8 +57,8 @@ databricks auth login --profile <DATABRICKS_AUTH_PROFILE> --host <DATABRICKS_URL
 
 ### Run Default Suites
 
-When no `--eval` flag is provided, three suites run in canonical order:
-**enterprise → hallucination → model** (vision is excluded by default).
+When no `--eval` flag is provided, three default suites run:
+**enterprise, hallucination, model** (vision is excluded by default).
 
 ```bash
 uv run playbook.py --model "openai/gpt-4o" --judge "openai/gpt-4o"
@@ -105,16 +105,13 @@ uv run playbook.py --model "google/gemini-3-flash-preview" --judge "gpt-5.2" --l
 | `model` | `data/data.json` | General model quality — correctness, clarity, BLEU, ROUGE, cosine similarity |
 | `vision` | `data/vision.json` | Multimodal / vision evaluation (optional — skipped if data file is absent) |
 
-### Canonical Execution Order
+### Concurrency
 
-Suites always run in this fixed order, regardless of how they are specified on the command line:
-
-```
-enterprise → hallucination → model → vision
-```
+Suites run sequentially. Within each suite, MLflow parallelizes predict\_fn
+calls internally. Use `--max-concurrent` to control how many predict\_fn calls
+can run simultaneously (default: 10).
 
 If a suite's data file is missing, that suite is skipped with a warning.
-If any suite fails, the run aborts immediately.
 
 ### Command Options
 
@@ -126,6 +123,7 @@ If any suite fails, the run aborts immediately.
 | `--judge-provider` | | | Provider for the judge model (default: same as `--provider`) |
 | `--eval` | `-e` | | Comma-separated suites or `all`. Default: `enterprise,hallucination,model` |
 | `--limit` | | | Limit number of test cases per dataset (useful for debugging) |
+| `--max-concurrent` | `-c` | | Max concurrent predict\_fn calls across all suites (default: `10`) |
 | `--data-dir` | | | Path to test data directory (default: `./data`) |
 
 ## MLflow Run Structure
