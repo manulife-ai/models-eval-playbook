@@ -55,18 +55,24 @@ databricks auth login --profile <DATABRICKS_AUTH_PROFILE> --host <DATABRICKS_URL
 
 ## Running Evaluations
 
-### Run All Suites (End-to-End)
+### Run Default Suites
 
-When no `--eval` flag is provided, all four suites run in canonical order:
-**enterprise → hallucination → model → vision**.
+When no `--eval` flag is provided, three suites run in canonical order:
+**enterprise → hallucination → model** (vision is excluded by default).
 
 ```bash
 uv run playbook.py --model "openai/gpt-4o" --judge "openai/gpt-4o"
 ```
 
+### Run All Suites (Including Vision)
+
+```bash
+uv run playbook.py --model "openai/gpt-4o" --judge "openai/gpt-4o" --eval all
+```
+
 ### Run Specific Suites
 
-Use one or more `--eval` (or `-e`) flags to select which suites to run.
+Pass a comma-separated list to `--eval` (or `-e`).
 Suites **always execute in canonical order** regardless of the order you
 specify them on the command line.
 
@@ -77,11 +83,11 @@ uv run playbook.py --model "openai/gpt-4o" --judge "openai/gpt-4o" \
 
 # Run enterprise and model suites (executed as enterprise → model)
 uv run playbook.py --model "openai/gpt-4o" --judge "openai/gpt-4o" \
-    -e enterprise -e model
+    --eval enterprise,model
 
-# Run everything except vision
+# Run enterprise and vision only
 uv run playbook.py --model "openai/gpt-4o" --judge "openai/gpt-4o" \
-    -e enterprise -e hallucination -e model
+    --eval enterprise,vision
 ```
 
 ### Test with Limit (for debugging)
@@ -118,7 +124,7 @@ If any suite fails, the run aborts immediately.
 | `--judge` | | ✅ | Judge model name for scoring |
 | `--provider` | | | Provider for the model being tested (default: `openai`) |
 | `--judge-provider` | | | Provider for the judge model (default: same as `--provider`) |
-| `--eval` | `-e` | | Suite(s) to run. Repeatable. If omitted, all suites run. |
+| `--eval` | `-e` | | Comma-separated suites or `all`. Default: `enterprise,hallucination,model` |
 | `--limit` | | | Limit number of test cases per dataset (useful for debugging) |
 | `--data-dir` | | | Path to test data directory (default: `./data`) |
 
