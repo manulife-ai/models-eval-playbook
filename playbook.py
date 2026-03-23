@@ -11,10 +11,7 @@
 #     "nltk",
 #     "numpy",
 #     "pandas",
-#     "py-readability-metrics",
-#     "rouge",
 #     "scikit-learn",
-#     "psutil",
 # ]
 # ///
 import datetime
