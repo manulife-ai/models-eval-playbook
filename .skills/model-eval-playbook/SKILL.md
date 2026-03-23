@@ -46,12 +46,13 @@ uv run playbook.py \
   --judge "<judge-model>" \
   --provider <provider> \
   --judge-provider <judge-provider> \
-  [--eval <suite>]... \
+  [--eval <suites>] \
   [--limit N]
 ```
 
-- Omit `--eval` to run all suites (enterprise → hallucination → model → vision)
-- Use `-e enterprise -e vision` to run specific suites
+- Omit `--eval` to run default suites (enterprise, hallucination, model)
+- Use `--eval all` to run all suites including vision
+- Use `--eval enterprise,vision` to run specific suites (comma-separated)
 - Use `--limit N` for debugging (limits test cases per suite)
 - Suites always execute in canonical order regardless of flag order
 
@@ -98,4 +99,4 @@ Full API patterns and code snippets are in `references/mlflow-diagnosis.md`. Rea
 | `image was specified using image/png but appears to be image/jpeg` | S3 images with wrong Content-Type/extension | Fixed: `_detect_image_type` uses magic bytes |
 | `scorer requires the following fields: outputs` | predict_fn returned no output (trace ERROR state) | Check span events for the upstream API error |
 | `OPENAI_API_KEY not set` | `.env` not sourced before running | Source .env: `set -a && source .env && set +a` |
-| `--with-vision` not recognized | Stale run scripts using old CLI flag | Use `--eval vision` instead |
+| `--with-vision` not recognized | Stale run scripts using old CLI flag | Use `--eval all` to include vision |

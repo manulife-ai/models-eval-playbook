@@ -71,3 +71,5 @@ dmypy.json
 
 # UV
 .uv/
+.env.bak
+run_eval_suite.sh
