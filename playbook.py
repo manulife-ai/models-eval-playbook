@@ -469,6 +469,7 @@ def run_evaluations(
 
 # Canonical execution order – suites always run in this sequence.
 SUITE_ORDER: list[str] = ["enterprise", "hallucination", "model", "vision"]
+DEFAULT_SUITES: list[str] = ["enterprise", "hallucination", "model"]
 
 
 def _log_token_usage(run_id: str, parent_run_id: str) -> None:
@@ -703,6 +704,24 @@ SUITE_RUNNERS: dict[str, Callable] = {
 # =============================================================================
 
 
+def parse_eval(ctx, param, value: str | None) -> list[str]:
+    """Parse --eval value: comma-separated suite names or 'all'."""
+    if value is None:
+        return list(DEFAULT_SUITES)
+    names = [n.strip().lower() for n in value.split(",") if n.strip()]
+    if not names:
+        raise click.BadParameter("No suite names provided.")
+    if "all" in names:
+        return list(SUITE_ORDER)
+    invalid = [n for n in names if n not in SUITE_ORDER]
+    if invalid:
+        raise click.BadParameter(
+            f"Unknown suite(s): {', '.join(invalid)}. "
+            f"Valid: {', '.join(SUITE_ORDER)} or 'all'"
+        )
+    return [s for s in SUITE_ORDER if s in names]
+
+
 @click.command
 @click.option("--model", help="Model to evaluate", required=True)
 @click.option("--judge", help="Judge to use for evaluation", required=True)
@@ -715,9 +734,11 @@ SUITE_RUNNERS: dict[str, Callable] = {
 @click.option(
     "--eval", "-e",
     "evals",
-    multiple=True,
-    type=click.Choice(SUITE_ORDER, case_sensitive=False),
-    help="Evaluation suite(s) to run. Repeatable. If omitted, all suites run.",
+    default=None,
+    callback=parse_eval,
+    expose_value=True,
+    is_eager=False,
+    help="Comma-separated suites or 'all'. Default: enterprise,hallucination,model",
 )
 @click.option(
     "--data-dir",
@@ -737,7 +758,7 @@ def evaluate(
     data_dir: str,
     provider: str = "openai",
     judge_provider: str | None = None,
-    evals: tuple[str, ...] = (),
+    evals: list[str] = None,
     limit: int | None = None,
 ):
     # Build configurations for model and judge
@@ -746,9 +767,8 @@ def evaluate(
         provider=judge_provider if judge_provider else provider
     )
 
-    # Resolve which suites to run, always in canonical order
-    requested = [e.lower() for e in evals] if evals else SUITE_ORDER
-    to_run = [s for s in SUITE_ORDER if s in requested]
+    # evals is already parsed/validated by the parse_eval callback
+    to_run = evals
 
     if not to_run:
         click.echo("No valid evaluation suites selected.")
