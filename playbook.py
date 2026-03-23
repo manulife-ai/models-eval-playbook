@@ -14,7 +14,6 @@
 #     "scikit-learn",
 # ]
 # ///
-import concurrent.futures
 import datetime
 import json
 import os
@@ -441,22 +440,14 @@ SUITE_ORDER: list[str] = ["enterprise", "hallucination", "model", "vision"]
 DEFAULT_SUITES: list[str] = ["enterprise", "hallucination", "model"]
 
 
-def _log_token_usage(
-    run_id: str,
-    parent_run_id: str,
-    parent_metrics_lock=None,
-) -> None:
+def _log_token_usage(run_id: str, parent_run_id: str) -> None:
     """Search traces for a run and log avg token usage to both child and parent."""
     traces = mlflow.search_traces(
         filter_string=f"run_id = '{run_id}'", return_type="list"
     )
     token_metrics = avg_token_usage(traces)
     mlflow.log_metrics(token_metrics)
-    if parent_metrics_lock:
-        with parent_metrics_lock:
-            mlflow.log_metrics(token_metrics, run_id=parent_run_id)
-    else:
-        mlflow.log_metrics(token_metrics, run_id=parent_run_id)
+    mlflow.log_metrics(token_metrics, run_id=parent_run_id)
 
 
 def run_enterprise(
@@ -468,7 +459,6 @@ def run_enterprise(
     parent_run_id: str,
     epoch: int,
     limit: int | None = None,
-    parent_metrics_lock=None,
 ) -> None:
     """Enterprise-policy evaluation (brand safety, regulatory, privacy, …)."""
     data_path = data_dir / "enterprise.json"
@@ -507,12 +497,8 @@ def run_enterprise(
             predict_fn=predict_fn,
             scorers=scorers,
         )
-        _log_token_usage(suite_run.info.run_id, parent_run_id, parent_metrics_lock)
-        if parent_metrics_lock:
-            with parent_metrics_lock:
-                mlflow.log_metrics(results.metrics, run_id=parent_run_id)
-        else:
-            mlflow.log_metrics(results.metrics, run_id=parent_run_id)
+        _log_token_usage(suite_run.info.run_id, parent_run_id)
+        mlflow.log_metrics(results.metrics, run_id=parent_run_id)
 
 
 def run_hallucination(
@@ -524,7 +510,6 @@ def run_hallucination(
     parent_run_id: str,
     epoch: int,
     limit: int | None = None,
-    parent_metrics_lock=None,
 ) -> None:
     """Hallucination / groundedness evaluation."""
     data_path = data_dir / "hallucination.json"
@@ -559,12 +544,8 @@ def run_hallucination(
             predict_fn=predict_fn,
             scorers=scorers,
         )
-        _log_token_usage(suite_run.info.run_id, parent_run_id, parent_metrics_lock)
-        if parent_metrics_lock:
-            with parent_metrics_lock:
-                mlflow.log_metrics(results.metrics, run_id=parent_run_id)
-        else:
-            mlflow.log_metrics(results.metrics, run_id=parent_run_id)
+        _log_token_usage(suite_run.info.run_id, parent_run_id)
+        mlflow.log_metrics(results.metrics, run_id=parent_run_id)
 
 
 def run_model(
@@ -576,7 +557,6 @@ def run_model(
     parent_run_id: str,
     epoch: int,
     limit: int | None = None,
-    parent_metrics_lock=None,
 ) -> None:
     """Model-quality evaluation (correctness, clarity, BLEU, ROUGE, …)."""
     data_path = data_dir / "data.json"
@@ -620,12 +600,8 @@ def run_model(
             predict_fn=predict_fn,
             scorers=scorers,
         )
-        _log_token_usage(suite_run.info.run_id, parent_run_id, parent_metrics_lock)
-        if parent_metrics_lock:
-            with parent_metrics_lock:
-                mlflow.log_metrics(results.metrics, run_id=parent_run_id)
-        else:
-            mlflow.log_metrics(results.metrics, run_id=parent_run_id)
+        _log_token_usage(suite_run.info.run_id, parent_run_id)
+        mlflow.log_metrics(results.metrics, run_id=parent_run_id)
 
 
 def run_vision(
@@ -637,7 +613,6 @@ def run_vision(
     parent_run_id: str,
     epoch: int,
     limit: int | None = None,
-    parent_metrics_lock=None,
 ) -> None:
     """Vision / multimodal evaluation (optional – skipped if no data file)."""
     data_path = data_dir / "vision.json"
@@ -679,12 +654,8 @@ def run_vision(
             predict_fn=predict_fn,
             scorers=scorers,
         )
-        _log_token_usage(suite_run.info.run_id, parent_run_id, parent_metrics_lock)
-        if parent_metrics_lock:
-            with parent_metrics_lock:
-                mlflow.log_metrics(results.metrics, run_id=parent_run_id)
-        else:
-            mlflow.log_metrics(results.metrics, run_id=parent_run_id)
+        _log_token_usage(suite_run.info.run_id, parent_run_id)
+        mlflow.log_metrics(results.metrics, run_id=parent_run_id)
 
 
 # Dispatch map for suite runners
@@ -750,12 +721,6 @@ def parse_eval(ctx, param, value: str | None) -> list[str]:
     help="Limit number of test cases per dataset (useful for debugging)",
 )
 @click.option(
-    "--sequential",
-    is_flag=True,
-    default=False,
-    help="Run suites sequentially instead of in parallel",
-)
-@click.option(
     "--max-concurrent",
     "-c",
     default=10,
@@ -770,7 +735,6 @@ def evaluate(
     judge_provider: str | None = None,
     evals: list[str] = None,
     limit: int | None = None,
-    sequential: bool = False,
     max_concurrent: int = 10,
 ):
     # Build configurations for model and judge
@@ -904,49 +868,22 @@ def evaluate(
                 result = agent.invoke({"messages": _sanitize_messages(messages)})
                 return result if result and str(result).strip() else "[Model returned empty response]"
 
-        # Run selected suites
-        parent_metrics_lock = threading.Lock()
-        suite_kwargs = dict(
-            model=model,
-            judge_model_name=judge_model_name,
-            predict_fn=predict_fn,
-            data_dir=data_path,
-            parent_run_id=run.info.run_id,
-            epoch=epoch_time,
-            limit=limit,
-            parent_metrics_lock=parent_metrics_lock,
-        )
-
-        def _run_suite(suite_name: str) -> None:
+        # Run selected suites sequentially.
+        # MLflow's evaluate() parallelizes predict_fn calls internally;
+        # the semaphore above controls concurrency. Inter-suite parallelism
+        # is not used because MLflow's trace manager singleton causes
+        # contention/data loss when multiple evaluate() calls overlap.
+        for suite_name in to_run:
             click.echo(f"\n▶ Running suite: {suite_name}")
-            SUITE_RUNNERS[suite_name](**suite_kwargs)
-
-        if sequential:
-            for suite_name in to_run:
-                _run_suite(suite_name)
-        else:
-            # MLflow evaluate() has internal contention with 3+ concurrent
-            # calls, so cap parallel suite workers at 2.
-            workers = min(2, len(to_run))
-            click.echo(
-                f"Running {len(to_run)} suites in parallel "
-                f"({workers} at a time, max-concurrent={max_concurrent})"
+            SUITE_RUNNERS[suite_name](
+                model=model,
+                judge_model_name=judge_model_name,
+                predict_fn=predict_fn,
+                data_dir=data_path,
+                parent_run_id=run.info.run_id,
+                epoch=epoch_time,
+                limit=limit,
             )
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=workers,
-            ) as pool:
-                futures = {
-                    pool.submit(_run_suite, name): name for name in to_run
-                }
-                for future in concurrent.futures.as_completed(futures):
-                    suite = futures[future]
-                    try:
-                        future.result()
-                    except Exception as exc:
-                        click.echo(f"\n❌ Suite '{suite}' failed: {exc}")
-                        for f in futures:
-                            f.cancel()
-                        raise
 
         click.echo(f"\n✅ All requested suites complete. Epoch: {epoch_time}")
 
