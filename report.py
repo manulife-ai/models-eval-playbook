@@ -17,6 +17,23 @@ import pandas as pd
 from tabulate import tabulate
 
 # Categories and the metrics we expect from each
+_OPERATIONAL_METRICS = [
+    "p50_total_tokens",
+    "p95_total_tokens",
+    "sum_total_tokens",
+    "total_cost_usd",
+    "avg_cost_per_call_usd",
+    "latency_avg_s",
+    "latency_p50_s",
+    "latency_p95_s",
+    "suite_wall_clock_s",
+    "throughput_calls_per_s",
+    "error_rate",
+    "error_count",
+    "total_predictions",
+    "response_length_avg",
+]
+
 CATEGORY_METRICS = {
     "enterprise": [
         "safety/mean",
@@ -24,12 +41,14 @@ CATEGORY_METRICS = {
         "avg_input_tokens",
         "avg_output_tokens",
         "avg_total_tokens",
+        *_OPERATIONAL_METRICS,
     ],
     "hallucination": [
         "follows_instructions/mean",
         "avg_input_tokens",
         "avg_output_tokens",
         "avg_total_tokens",
+        *_OPERATIONAL_METRICS,
     ],
     "model": [
         "safety/mean",
@@ -41,6 +60,7 @@ CATEGORY_METRICS = {
         "avg_input_tokens",
         "avg_output_tokens",
         "avg_total_tokens",
+        *_OPERATIONAL_METRICS,
     ],
     "vision": [
         "safety/mean",
@@ -50,10 +70,27 @@ CATEGORY_METRICS = {
         "avg_input_tokens",
         "avg_output_tokens",
         "avg_total_tokens",
+        *_OPERATIONAL_METRICS,
     ],
 }
 
 KNOWN_CATEGORIES = set(CATEGORY_METRICS.keys())
+
+_INTEGER_METRICS = {"error_count", "total_predictions"}
+_LARGE_NUMBER_METRICS = {"p50_total_tokens", "p95_total_tokens", "sum_total_tokens"}
+
+
+def _format_metric(label: str, val: float) -> str:
+    name = label.rsplit("/", 1)[-1]
+    if name in _INTEGER_METRICS:
+        return f"{int(val)}"
+    if name.endswith("_usd"):
+        return f"${val:.6f}"
+    if name.endswith("_s"):
+        return f"{val:.3f}"
+    if name in _LARGE_NUMBER_METRICS:
+        return f"{val:,.0f}"
+    return f"{val:.4f}"
 
 
 def parse_experiment_id(value: str) -> str:
@@ -254,7 +291,7 @@ def report(experiment: str, run_id: str | None, output: str | None):
             if val is None:
                 row.append("-")
             else:
-                row.append(f"{val:.4f}")
+                row.append(_format_metric(metric, val))
         rows.append(row)
 
     headers = ["Metric"] + sorted_models

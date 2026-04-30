@@ -235,17 +235,62 @@ def to_litellm_model_name(model: str, config: ModelConfig) -> str:
 
 
 
-def avg_token_usage(traces) -> dict[str, float]:
-    usg = {}
-    n = 0
-    for trace in traces:
-        if total_usage := trace.info.token_usage:
-            n += 1
-            for key, value in total_usage.items():
-                usg[key] = usg.get(key, 0) + value
-    if n == 0:
-        return {}
-    return {f"avg_{key}": value / n for key, value in usg.items()}
+class PredictionStats:
+    """Thread-safe collector for per-prediction metrics within a suite."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.latencies: list[float] = []
+        self.error_count: int = 0
+        self.total_calls: int = 0
+        self.response_lengths: list[int] = []
+        self.input_tokens: list[int] = []
+        self.output_tokens: list[int] = []
+        self.total_tokens: list[int] = []
+
+    def record(self, latency_s: float, response: str, is_error: bool,
+               usage: dict | None = None):
+        with self._lock:
+            self.total_calls += 1
+            self.latencies.append(latency_s)
+            if is_error:
+                self.error_count += 1
+            else:
+                self.response_lengths.append(len(response))
+            if usage:
+                self.input_tokens.append(usage.get("input_tokens", 0))
+                self.output_tokens.append(usage.get("output_tokens", 0))
+                self.total_tokens.append(usage.get("total_tokens", 0))
+
+    def to_metrics(self) -> dict[str, float]:
+        metrics: dict[str, float] = {}
+        if self.total_calls > 0:
+            metrics["error_count"] = self.error_count
+            metrics["error_rate"] = self.error_count / self.total_calls
+            metrics["total_predictions"] = self.total_calls
+        if self.latencies:
+            arr = np.array(self.latencies)
+            metrics["latency_avg_s"] = float(np.mean(arr))
+            metrics["latency_p50_s"] = float(np.median(arr))
+            metrics["latency_p95_s"] = float(np.percentile(arr, 95))
+        if self.response_lengths:
+            metrics["response_length_avg"] = float(np.mean(self.response_lengths))
+        return metrics
+
+    def token_metrics(self) -> dict[str, float]:
+        if not self.input_tokens:
+            return {}
+        inp = np.array(self.input_tokens)
+        out = np.array(self.output_tokens)
+        tot = np.array(self.total_tokens)
+        return {
+            "avg_input_tokens": float(np.mean(inp)),
+            "avg_output_tokens": float(np.mean(out)),
+            "avg_total_tokens": float(np.mean(tot)),
+            "p50_total_tokens": float(np.median(tot)),
+            "p95_total_tokens": float(np.percentile(tot, 95)),
+            "sum_total_tokens": float(np.sum(tot)),
+        }
 
 
 @scorer(
@@ -378,14 +423,52 @@ SUITE_ORDER: list[str] = ["enterprise", "hallucination", "model", "vision"]
 DEFAULT_SUITES: list[str] = ["enterprise", "hallucination", "model"]
 
 
-def _log_token_usage(run_id: str) -> None:
-    """Search traces for a run and log avg token usage to the child run."""
+def _log_suite_metrics(run_id: str, stats: PredictionStats) -> None:
+    """Compute and log comprehensive suite metrics from traces and prediction stats."""
     traces = mlflow.search_traces(
         filter_string=f"run_id = '{run_id}'", return_type="list"
     )
-    token_metrics = avg_token_usage(traces)
-    if token_metrics:
-        mlflow.log_metrics(token_metrics)
+
+    # Try trace-level token usage first (populated by MLflow autolog integrations)
+    trace_input, trace_output, trace_total = [], [], []
+    total_cost = 0.0
+    has_cost = False
+
+    for trace in traces:
+        if usage := trace.info.token_usage:
+            trace_input.append(usage.get("input_tokens", 0))
+            trace_output.append(usage.get("output_tokens", 0))
+            trace_total.append(usage.get("total_tokens", 0))
+        if cost := getattr(trace.info, "cost", None):
+            if isinstance(cost, dict) and "total_cost" in cost:
+                total_cost += cost["total_cost"]
+                has_cost = True
+
+    metrics: dict[str, float] = {}
+
+    # Prefer trace-level tokens; fall back to PredictionStats (from response metadata)
+    if trace_input:
+        inp = np.array(trace_input)
+        out = np.array(trace_output)
+        tot = np.array(trace_total)
+        metrics["avg_input_tokens"] = float(np.mean(inp))
+        metrics["avg_output_tokens"] = float(np.mean(out))
+        metrics["avg_total_tokens"] = float(np.mean(tot))
+        metrics["p50_total_tokens"] = float(np.median(tot))
+        metrics["p95_total_tokens"] = float(np.percentile(tot, 95))
+        metrics["sum_total_tokens"] = float(np.sum(tot))
+    else:
+        metrics.update(stats.token_metrics())
+
+    if has_cost:
+        metrics["total_cost_usd"] = total_cost
+        if trace_total:
+            metrics["avg_cost_per_call_usd"] = total_cost / len(trace_total)
+
+    metrics.update(stats.to_metrics())
+
+    if metrics:
+        mlflow.log_metrics(metrics)
 
 
 def run_enterprise(
@@ -393,6 +476,7 @@ def run_enterprise(
     model: str,
     judge_model_name: str,
     predict_fn: Callable,
+    prediction_stats: PredictionStats,
     data_dir: Path,
     parent_run_id: str,
     epoch: int,
@@ -431,13 +515,18 @@ def run_enterprise(
     ) as suite_run:
         click.echo(f"Created enterprise run with ID: {suite_run.info.run_id}")
         mlflow.autolog(disable=True)
+        t0 = time.perf_counter()
         results = mlflow.genai.evaluate(
             data=data,
             predict_fn=predict_fn,
             scorers=scorers,
         )
+        wall_clock = time.perf_counter() - t0
         mlflow.log_metrics(results.metrics)
-        _log_token_usage(suite_run.info.run_id)
+        mlflow.log_metric("suite_wall_clock_s", wall_clock)
+        if prediction_stats.total_calls > 0:
+            mlflow.log_metric("throughput_calls_per_s", prediction_stats.total_calls / wall_clock)
+        _log_suite_metrics(suite_run.info.run_id, prediction_stats)
 
 
 def run_hallucination(
@@ -445,6 +534,7 @@ def run_hallucination(
     model: str,
     judge_model_name: str,
     predict_fn: Callable,
+    prediction_stats: PredictionStats,
     data_dir: Path,
     parent_run_id: str,
     epoch: int,
@@ -480,13 +570,18 @@ def run_hallucination(
     ) as suite_run:
         click.echo(f"Created hallucination run with ID: {suite_run.info.run_id}")
         mlflow.autolog(disable=True)
+        t0 = time.perf_counter()
         results = mlflow.genai.evaluate(
             data=data,
             predict_fn=predict_fn,
             scorers=scorers,
         )
+        wall_clock = time.perf_counter() - t0
         mlflow.log_metrics(results.metrics)
-        _log_token_usage(suite_run.info.run_id)
+        mlflow.log_metric("suite_wall_clock_s", wall_clock)
+        if prediction_stats.total_calls > 0:
+            mlflow.log_metric("throughput_calls_per_s", prediction_stats.total_calls / wall_clock)
+        _log_suite_metrics(suite_run.info.run_id, prediction_stats)
 
 
 def run_model(
@@ -494,6 +589,7 @@ def run_model(
     model: str,
     judge_model_name: str,
     predict_fn: Callable,
+    prediction_stats: PredictionStats,
     data_dir: Path,
     parent_run_id: str,
     epoch: int,
@@ -538,13 +634,18 @@ def run_model(
     ) as suite_run:
         click.echo(f"Created model run with ID: {suite_run.info.run_id}")
         mlflow.autolog(disable=True)
+        t0 = time.perf_counter()
         results = mlflow.genai.evaluate(
             data=data,
             predict_fn=predict_fn,
             scorers=scorers,
         )
+        wall_clock = time.perf_counter() - t0
         mlflow.log_metrics(results.metrics)
-        _log_token_usage(suite_run.info.run_id)
+        mlflow.log_metric("suite_wall_clock_s", wall_clock)
+        if prediction_stats.total_calls > 0:
+            mlflow.log_metric("throughput_calls_per_s", prediction_stats.total_calls / wall_clock)
+        _log_suite_metrics(suite_run.info.run_id, prediction_stats)
 
 
 def run_vision(
@@ -552,6 +653,7 @@ def run_vision(
     model: str,
     judge_model_name: str,
     predict_fn: Callable,
+    prediction_stats: PredictionStats,
     data_dir: Path,
     parent_run_id: str,
     epoch: int,
@@ -594,13 +696,18 @@ def run_vision(
     ) as suite_run:
         click.echo(f"Created vision run with ID: {suite_run.info.run_id}")
         mlflow.autolog(disable=True)
+        t0 = time.perf_counter()
         results = mlflow.genai.evaluate(
             data=data,
             predict_fn=predict_fn,
             scorers=scorers,
         )
+        wall_clock = time.perf_counter() - t0
         mlflow.log_metrics(results.metrics)
-        _log_token_usage(suite_run.info.run_id)
+        mlflow.log_metric("suite_wall_clock_s", wall_clock)
+        if prediction_stats.total_calls > 0:
+            mlflow.log_metric("throughput_calls_per_s", prediction_stats.total_calls / wall_clock)
+        _log_suite_metrics(suite_run.info.run_id, prediction_stats)
 
 
 # Dispatch map for suite runners
@@ -811,13 +918,49 @@ def evaluate(
             return sanitized
 
         concurrency_sem = threading.Semaphore(max_concurrent)
+        _current_stats: list[PredictionStats | None] = [None]
+
+        def _extract_usage(result) -> dict | None:
+            # LangGraph agent returns dict with "messages"; unwrap to last message
+            msg = result
+            if isinstance(result, dict) and "messages" in result:
+                msgs = result["messages"]
+                if isinstance(msgs, list) and msgs:
+                    msg = msgs[-1]
+            elif isinstance(result, list) and result:
+                msg = result[-1]
+            usage = getattr(msg, "usage_metadata", None)
+            if usage and isinstance(usage, dict):
+                return usage
+            resp = getattr(msg, "response_metadata", None)
+            if resp and isinstance(resp, dict) and "usage" in resp:
+                u = resp["usage"]
+                return {
+                    "input_tokens": u.get("prompt_tokens", 0),
+                    "output_tokens": u.get("completion_tokens", 0),
+                    "total_tokens": u.get("total_tokens", 0),
+                }
+            return None
 
         def predict_fn(messages):
             with concurrency_sem:
+                t0 = time.perf_counter()
                 try:
                     result = agent.invoke({"messages": _sanitize_messages(messages)})
-                    return result if result and str(result).strip() else "[Model returned empty response]"
+                    elapsed = time.perf_counter() - t0
+                    usage = _extract_usage(result)
+                    response_str = str(result) if result else ""
+                    if not response_str.strip():
+                        if _current_stats[0]:
+                            _current_stats[0].record(elapsed, "", is_error=False, usage=usage)
+                        return "[Model returned empty response]"
+                    if _current_stats[0]:
+                        _current_stats[0].record(elapsed, response_str, is_error=False, usage=usage)
+                    return result
                 except Exception as e:
+                    elapsed = time.perf_counter() - t0
+                    if _current_stats[0]:
+                        _current_stats[0].record(elapsed, "", is_error=True)
                     return f"[Model error: {e}]"
 
         # Run selected suites sequentially.
@@ -827,10 +970,12 @@ def evaluate(
         # contention/data loss when multiple evaluate() calls overlap.
         for suite_name in to_run:
             click.echo(f"\n▶ Running suite: {suite_name}")
+            _current_stats[0] = PredictionStats()
             SUITE_RUNNERS[suite_name](
                 model=model,
                 judge_model_name=judge_model_name,
                 predict_fn=predict_fn,
+                prediction_stats=_current_stats[0],
                 data_dir=data_path,
                 parent_run_id=run.info.run_id,
                 epoch=epoch_time,
