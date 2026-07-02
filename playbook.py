@@ -191,10 +191,11 @@ def preflight_check(
                 api_key=config.api_key or "dummy",
                 base_url=config.api_base,
             )
+            # if using GPT-5.1 as judge, set max_completion tokens to a larger number in the pre-flight check
             client.chat.completions.create(
                 model=name,
                 messages=[{"role": "user", "content": "Say OK"}],
-                max_completion_tokens=1,
+                max_completion_tokens=16,  
             )
             click.echo(" OK")
         except APIStatusError as e:
@@ -941,7 +942,8 @@ def evaluate(
                     "total_tokens": u.get("total_tokens", 0),
                 }
             return None
-
+        
+        @mlflow.trace(name="predict_fn")
         def predict_fn(messages):
             with concurrency_sem:
                 t0 = time.perf_counter()
