@@ -252,6 +252,19 @@ def _is_transient(e: Exception) -> bool:
     return any(n in type(e).__name__ for n in _TRANSIENT_NAMES)
 
 
+# A provider content-filter block (e.g. Azure ContentPolicyViolation) is the deployment
+# refusing the request. It is answered with this text and judged like any other answer.
+CONTENT_FILTER_REFUSAL = ("I can't help with that request. "
+                          "[Blocked by the model provider's content filter.]")
+_CONTENT_FILTER_MARKERS = ("ContentPolicyViolation", "content_filter", "content management policy",
+                           "ResponsibleAIPolicyViolation")
+
+
+def _is_content_filter_block(e: Exception) -> bool:
+    text = f"{type(e).__name__} {e}"
+    return any(m in text for m in _CONTENT_FILTER_MARKERS)
+
+
 def _invoke_with_retries(call):
     for attempt in range(1, MODEL_CALL_ATTEMPTS + 1):
         try:
@@ -1260,6 +1273,16 @@ def evaluate(
                     return result
                 except Exception as e:
                     elapsed = time.perf_counter() - t0
+                    if _is_content_filter_block(e):
+                        # The provider's safety layer refused the request. Score it as a
+                        # refusal (the judge decides against the case's guideline), not an error.
+                        click.echo("ℹ️  provider content filter blocked a request; scored as a refusal",
+                                   err=True)
+                        if _current_stats[0]:
+                            _current_stats[0].record(elapsed, CONTENT_FILTER_REFUSAL, is_error=False)
+                        if collector:
+                            collector.record_call(messages, latency_s=elapsed, is_error=False)
+                        return CONTENT_FILTER_REFUSAL
                     click.echo(f"⚠️  model error after retries: {type(e).__name__}: {str(e)[:300]}", err=True)
                     if _current_stats[0]:
                         _current_stats[0].record(elapsed, "", is_error=True)
