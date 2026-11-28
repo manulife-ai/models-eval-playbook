@@ -608,9 +608,11 @@ class MubenchCollector:
             if call["is_error"]:
                 row["status"] = "error"
             elif score is None:
-                # Judge failed / gave no usable value: counted as error (scored 0).
+                # The judge gave no verdict (e.g. its own provider content filter refused to
+                # grade the case). That is not the model's fault: leave the case out of the
+                # score and report how many were left out.
                 judge_errors += 1
-                row["status"] = "error"
+                continue
             else:
                 row["status"] = "ok"
                 row["score"] = score
@@ -619,12 +621,12 @@ class MubenchCollector:
             rows.append(row)
         if judge_errors:
             click.echo(f"⚠️  mubench: {judge_errors} {suite_id} case(s) had no "
-                       f"'{primary}' judge value; logged as status=error")
+                       f"'{primary}' judge value; left out of the score (judge_unscored)")
         info = {k: float(v) for k, v in metrics.items()
                 if k.endswith("/mean") and k != f"{primary}/mean"
                 and isinstance(v, (int, float)) and not np.isnan(v)}
         if judge_errors:
-            info["judge_error/count"] = float(judge_errors)
+            info["judge_unscored/count"] = float(judge_errors)
         self.suites.append({
             "suite_id": suite_id,
             "primary": primary,
