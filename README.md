@@ -125,6 +125,46 @@ If a suite's data file is missing, that suite is skipped with a warning.
 | `--limit` | | | Limit number of test cases per dataset (useful for debugging) |
 | `--max-concurrent` | `-c` | | Max concurrent predict\_fn calls across all suites (default: `10`) |
 | `--data-dir` | | | Path to test data directory (default: `./data`) |
+| `--mubench` | | | Also log a [mubench](https://github.com/mfc-innersource/mubench) Run (see below) |
+
+## Publishing to mubench (optional)
+
+`--mubench` logs the run a second time in the mubench format so it can be
+published to the mubench leaderboards. Without the flag nothing changes. The
+playbook's own MLflow runs are logged as usual; the mubench Run goes to the
+`MUBENCH_MLFLOW_EXPERIMENT` experiment (default `/Shared/mubench`) on the same
+tracking server.
+
+`mubench` is not a playbook dependency; add it for the run with `--with`:
+
+```bash
+uv run --with "mubench @ git+https://github.com/mfc-innersource/mubench@feature/mubench-service#subdirectory=tools/mubench" \
+    playbook.py --model gpt-5.4-mini --judge gpt-5.4 --mubench
+# local mubench checkout instead: uv run --with-editable ../mubench/tools/mubench playbook.py ... --mubench
+```
+
+It prints `mubench run ID: <run-id>`. Then, from the mubench repo:
+
+```bash
+uv run mubench publish <run-id> --dry-run   # shows the Run Summary, sends nothing
+uv run mubench publish <run-id>
+```
+
+| Suite | mubench Suite | Primary Metric |
+|---|---|---|
+| `enterprise` | `playbook-enterprise` | `follows_instructions` (ExpectationsGuidelines) |
+| `hallucination` | `playbook-hallucination` | `follows_instructions` (ExpectationsGuidelines) |
+| `model` | `playbook-model` | `correctness` (Correctness vs `expected_response`) |
+| `vision` | `playbook-vision` | `correctness` (Correctness vs `expected_facts`) |
+
+- Judge `yes` = 1, `no` = 0. Other scorer means are logged as informational metrics.
+- Latency and tokens (incl. cached and reasoning) are for the model under test only.
+- A failed model call, or a case the judge could not score, is logged as `error` (scored 0).
+- The model's price is read from the gateway (`MODEL_API_BASE` without `/v1`) at the
+  end of the run. Model names starting with `or/` are logged as access route
+  `openrouter`, everything else as `foundry`.
+- The Suite Version is printed per suite. With `--limit` it differs from the full
+  dataset's, so only full runs match the catalog.
 
 ## MLflow Run Structure
 
