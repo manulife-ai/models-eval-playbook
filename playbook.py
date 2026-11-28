@@ -257,7 +257,8 @@ def _is_transient(e: Exception) -> bool:
 CONTENT_FILTER_REFUSAL = ("I can't help with that request. "
                           "[Blocked by the model provider's content filter.]")
 _CONTENT_FILTER_MARKERS = ("ContentPolicyViolation", "content_filter", "content management policy",
-                           "ResponsibleAIPolicyViolation")
+                           "ResponsibleAIPolicyViolation",
+                           "flagged for possible cybersecurity risk")  # OpenAI cyber-safety block
 
 
 def _is_content_filter_block(e: Exception) -> bool:
