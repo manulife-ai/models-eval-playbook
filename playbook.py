@@ -18,6 +18,7 @@ import datetime
 import json
 import os
 import threading
+import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -234,6 +235,31 @@ def to_litellm_model_name(model: str, config: ModelConfig) -> str:
     config.apply_to_env()
     return f"{config.provider}:/{model}"
 
+
+
+# Transient model-call failures (rate limits, timeouts, 5xx) are retried so they are
+# not scored as wrong answers. Other errors (e.g. 400 bad request) fail immediately.
+MODEL_CALL_ATTEMPTS = int(os.environ.get("PLAYBOOK_MODEL_ATTEMPTS", "4"))
+_TRANSIENT_STATUS = {408, 409, 429, 500, 502, 503, 504}
+_TRANSIENT_NAMES = ("Timeout", "RateLimit", "APIConnectionError", "ConnectionError",
+                    "InternalServerError", "ServiceUnavailable")
+
+
+def _is_transient(e: Exception) -> bool:
+    status = getattr(e, "status_code", None) or getattr(getattr(e, "response", None), "status_code", None)
+    if status in _TRANSIENT_STATUS:
+        return True
+    return any(n in type(e).__name__ for n in _TRANSIENT_NAMES)
+
+
+def _invoke_with_retries(call):
+    for attempt in range(1, MODEL_CALL_ATTEMPTS + 1):
+        try:
+            return call()
+        except Exception as e:  # noqa: BLE001 - re-raised unless transient
+            if attempt == MODEL_CALL_ATTEMPTS or not _is_transient(e):
+                raise
+            time.sleep(min(30.0, 2 ** attempt) + random.uniform(0, 1))
 
 
 class PredictionStats:
@@ -1127,6 +1153,11 @@ def evaluate(
 
         # Get judge model name (applies judge config to env)
         judge_model_name = to_litellm_model_name(judge, judge_config)
+        try:  # judges call the gateway through LiteLLM; retry transient failures there too
+            import litellm
+            litellm.num_retries = int(os.environ.get("PLAYBOOK_JUDGE_RETRIES", "3"))
+        except ImportError:
+            pass
 
         def _detect_image_type(data: bytes) -> str:
             """Detect actual image MIME type from magic bytes."""
@@ -1212,7 +1243,8 @@ def evaluate(
             with concurrency_sem:
                 t0 = time.perf_counter()
                 try:
-                    result = agent.invoke({"messages": _sanitize_messages(messages)})
+                    result = _invoke_with_retries(
+                        lambda: agent.invoke({"messages": _sanitize_messages(messages)}))
                     elapsed = time.perf_counter() - t0
                     usage = _extract_usage(result)
                     response_str = str(result) if result else ""
@@ -1228,6 +1260,7 @@ def evaluate(
                     return result
                 except Exception as e:
                     elapsed = time.perf_counter() - t0
+                    click.echo(f"⚠️  model error after retries: {type(e).__name__}: {str(e)[:300]}", err=True)
                     if _current_stats[0]:
                         _current_stats[0].record(elapsed, "", is_error=True)
                     if collector:
