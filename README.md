@@ -159,7 +159,7 @@ uv run mubench publish <run-id>
 
 - Judge `yes` = 1, `no` = 0. Other scorer means are logged as informational metrics.
 - Latency and tokens (incl. cached and reasoning) are for the model under test only.
-- A failed model call, or a case the judge could not score, is logged as `error` (scored 0).
+- A failed model call is logged as `error` (scored 0). A provider content-filter block is answered with a refusal and judged like any answer. A case the judge could not score (e.g. the judge's own content filter refused) is left out of the score and counted in the `judge_unscored/count` metric.
 - The model's price is read from the gateway (`MODEL_API_BASE` without `/v1`) at the
   end of the run. Model names starting with `or/` are logged as access route
   `openrouter`, everything else as `foundry`.
